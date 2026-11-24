@@ -81,25 +81,28 @@ class RegexProgressEngine {
       return "$packageName#$extractedId"
     }
 
-    // 3. Merchant name from this notification.
+    // 3. Merchant name from this notification. The order key uses the merchant's
+    // core name (branch suffix stripped, e.g. "麦当劳（中关村店）" -> "麦当劳") so
+    // that a title/text wording difference between updates cannot split one order.
     val merchant = extractMerchantName(input)
     if (!merchant.isNullOrBlank()) {
       return resolveBaseKey(
-        baseKey = "$packageName:m:$merchant",
+        baseKey = "$packageName:m:${merchantKeyName(merchant)}",
         input = input,
         existingOrders = existingOrders,
         config = config,
       )
     }
 
-    // 4. The text mentions the merchant of an existing active order.
+    // 4. The text mentions the merchant of an existing active order (by core name,
+    // so "麦当劳的订单配送中" still attaches to "麦当劳（中关村店）").
     val mentionedOrder =
       existingOrders.values
         .filter {
           it.packageName == packageName &&
             !it.userDismissed &&
             !it.merchantName.isNullOrBlank() &&
-            combined.contains(it.merchantName!!)
+            combined.contains(merchantKeyName(it.merchantName))
         }
         .maxByOrNull { it.lastUpdatedMillis }
     if (mentionedOrder != null) return mentionedOrder.orderKey
@@ -173,31 +176,29 @@ class RegexProgressEngine {
     return trimmed
   }
 
+  /** Strip a branch suffix ("麦当劳（中关村店）" -> "麦当劳") for order keying. */
+  private fun merchantKeyName(name: String): String =
+    name.substringBefore("（").substringBefore("(").trim()
+
   private fun merchantFromText(text: String, appName: String): String? {
     if (text.isBlank()) return null
     // 【麦当劳】
     Regex("""【([^】]{2,20})】""")
-      .find(text)
-      ?.groupValues
-      ?.getOrNull(1)
-      ?.trim()
-      ?.takeIf { isPlausibleMerchant(it, appName) }
+      .findAll(text)
+      .mapNotNull { it.groupValues.getOrNull(1)?.trim() }
+      .firstOrNull { isPlausibleMerchant(it, appName) }
       ?.let { return it }
     // 麦当劳已接单 / 麦当劳正在备餐 / 麦当劳配送中 (merchant directly before a status verb)
     Regex("""([^\s,，。：:；;\n]{2,20})(已接单|正在备餐|已出餐|配送中|已送达|预计|骑手已|商家已)""")
-      .find(text)
-      ?.groupValues
-      ?.getOrNull(1)
-      ?.trim()
-      ?.takeIf { isPlausibleMerchant(it, appName) }
+      .findAll(text)
+      .mapNotNull { it.groupValues.getOrNull(1)?.trim() }
+      .firstOrNull { isPlausibleMerchant(it, appName) }
       ?.let { return it }
     // 麦当劳的订单已接单
     Regex("""([^\s,，。：:；;\n]{2,20})的订单(已|正|即)""")
-      .find(text)
-      ?.groupValues
-      ?.getOrNull(1)
-      ?.trim()
-      ?.takeIf { isPlausibleMerchant(it, appName) }
+      .findAll(text)
+      .mapNotNull { it.groupValues.getOrNull(1)?.trim() }
+      .firstOrNull { isPlausibleMerchant(it, appName) }
       ?.let { return it }
     return null
   }
@@ -552,7 +553,7 @@ class RegexProgressEngine {
         "已接单", "已付款", "备餐", "配送", "送达", "骑手", "预计", "分钟", "公里",
         "完成", "感谢", "外卖", "跑腿", "取餐", "送餐", "正在", "即将", "到达",
         "出发", "已取", "已出", "到店", "自取", "打包", "催单", "退款", "取消",
-        "超时", "准时", "评价", "红包", "优惠", "神券", "会员",
+        "超时", "准时", "评价", "红包", "优惠", "神券", "会员", "商家",
       )
 
     fun isValidRegex(pattern: String): Boolean =
