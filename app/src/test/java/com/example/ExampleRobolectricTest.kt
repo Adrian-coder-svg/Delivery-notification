@@ -13,7 +13,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+// Robolectric 4.16.1 ships android-all only up to API 35, so run on 34; the
+// adapter branches on SDK_INT at runtime and this test only checks it posts
+// without error and returns a diagnostic message.
+@Config(sdk = [34])
 class ExampleRobolectricTest {
 
   @Test
