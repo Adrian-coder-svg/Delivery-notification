@@ -68,13 +68,14 @@ import com.example.ui.components.NowBarPreviewCard
 import com.example.ui.theme.PulseAmber
 import com.example.ui.theme.PulseMint
 import com.example.util.SystemPermissionHelper
+import kotlinx.coroutines.flow.StateFlow
 
 @Composable
 fun MonitorScreen(
   activeOrders: List<LiveOrderState>,
   monitoredApps: List<MonitoredApp>,
   permissionStatus: SystemPermissionStatus,
-  nowMillis: Long,
+  tickerMillis: StateFlow<Long>,
   onRequestPostNotificationPermission: () -> Unit,
   onSimulateNotification: (packageName: String, title: String, body: String, orderHintKey: String) -> Unit,
   onDismissOrder: (orderKey: String, notificationId: Int) -> Unit,
@@ -155,7 +156,7 @@ fun MonitorScreen(
       items(activeOrders, key = { it.orderKey }) { order ->
         NowBarPreviewCard(
           order = order,
-          nowMillis = nowMillis,
+          tickerMillis = tickerMillis,
           onDismiss = { onDismissOrder(order.orderKey, order.notificationId) },
           onAdvanceSimulation = {
             val nextBody =
