@@ -3,6 +3,7 @@ package com.example.service
 import android.app.Notification
 import android.content.ComponentName
 import android.service.notification.NotificationListenerService
+import android.service.notification.RankingMap
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.example.LiveDeliveryApp
@@ -36,6 +37,30 @@ class DeliveryNotificationListener : NotificationListenerService() {
     if (sbn == null) return
     val app = application as? LiveDeliveryApp ?: return
     dispatchIfMonitored(sbn, app)
+  }
+
+  override fun onNotificationRemoved(
+    sbn: StatusBarNotification?,
+    rankingMap: RankingMap?,
+    reason: Int,
+  ) {
+    if (sbn == null) return
+    val app = application as? LiveDeliveryApp ?: return
+    val sourcePackage = sbn.packageName ?: return
+    if (sourcePackage == packageName) return
+    if (!app.container.repository.isMonitoredPackage(sourcePackage)) return
+    // Only an explicit removal takes the live order down: the user swiping the
+    // source notification away, the source app cancelling it, or the user
+    // clearing all notifications. A tap (REASON_CLICK) opens the app and the
+    // delivery continues, so it is ignored.
+    if (
+      reason != NotificationListenerService.REASON_CANCEL &&
+        reason != NotificationListenerService.REASON_CANCEL_ALL &&
+        reason != NotificationListenerService.REASON_APP_CANCEL
+    ) {
+      return
+    }
+    app.container.repository.dismissOrderBySourceKey(sourcePackage, sbn.key)
   }
 
   private fun dispatchIfMonitored(sbn: StatusBarNotification, app: LiveDeliveryApp) {
