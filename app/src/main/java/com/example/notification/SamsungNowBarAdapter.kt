@@ -159,7 +159,7 @@ class SamsungNowBarAdapter(private val context: Context) {
         putInt("com.samsung.android.ongoing_activity.max_progress", 100)
         putString("com.samsung.android.ongoing_activity.chip_text", order.chipShortText)
         putInt("com.samsung.android.ongoing_activity.chip_color", stageColorInt)
-        putString("com.samsung.android.ongoing_activity.sub_text", order.appName)
+        putString("com.samsung.android.ongoing_activity.sub_text", order.merchantName ?: order.appName)
       }
 
     val builder =
@@ -174,7 +174,7 @@ class SamsungNowBarAdapter(private val context: Context) {
       .setSmallIcon(R.drawable.ic_notification_delivery)
       .setContentTitle(order.title)
       .setContentText(order.contentText)
-      .setSubText(order.appName)
+      .setSubText(order.merchantName ?: order.appName)
       .setContentIntent(contentPendingIntent)
       .setDeleteIntent(deletePendingIntent)
       .setCategory(Notification.CATEGORY_PROGRESS)
