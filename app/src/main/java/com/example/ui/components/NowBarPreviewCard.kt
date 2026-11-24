@@ -115,6 +115,19 @@ fun NowBarPreviewCard(
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
           )
+          if (
+            !order.merchantName.isNullOrBlank() &&
+              order.merchantName != order.title &&
+              order.merchantName != order.appName
+          ) {
+            Text(
+              text = "· ${order.merchantName}",
+              style = MaterialTheme.typography.titleMedium,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
           // Live Status Bar Capsule Preview (Android 16 / One UI 8+ Chip)
           StatusChipPill(
             text = order.chipShortText,
