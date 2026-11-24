@@ -80,6 +80,7 @@ data class LiveOrderState(
   val packageName: String,
   val appName: String,
   val accentColorHex: Long,
+  val merchantName: String? = null,
   val title: String,
   val contentText: String,
   val stage: DeliveryStage,
