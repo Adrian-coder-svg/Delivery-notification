@@ -220,12 +220,17 @@ fun RulesScreen(
           ) {
             Column(modifier = Modifier.weight(1f)) {
               Text(
-                text = "三段式正则进度引擎",
+                text = "节点式进度引擎",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
               )
               Text(
-                text = "Stage 1 (0%) → Stage 2 (1%~99%) → Stage 3 (100%)",
+                text = "商家接单 0% → 骑手接单 10% → 取货 20%~90% → 送达 100%",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+              Text(
+                text = "内置：取货后按预计送达最晚时间在 20%~90% 之间插值",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
               )
@@ -242,7 +247,7 @@ fun RulesScreen(
           }
 
           RegexField(
-            label = "Stage 1 · 备餐/接单正则 (固定 0%)",
+            label = "Stage 1 · 备餐/接单正则 (商家接单 0%，骑手接单 10%)",
             value = stage1,
             onValueChange = {
               stage1 = it
@@ -250,7 +255,7 @@ fun RulesScreen(
             },
           )
           RegexField(
-            label = "Stage 2A · 静态配送正则 (默认 50%)",
+            label = "Stage 2A · 静态配送正则 (保留当前进度）",
             value = stage2Static,
             onValueChange = {
               stage2Static = it

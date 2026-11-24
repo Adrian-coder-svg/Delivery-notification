@@ -436,7 +436,7 @@ private fun PipelineTesterCard(
               fontWeight = FontWeight.SemiBold,
             )
             Text(
-              text = "点击展开模拟美团/饿了么/京东三段式状态流转",
+              text = "点击展开模拟美团/饿了么/京东节点式状态流转",
               style = MaterialTheme.typography.bodyMedium,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
