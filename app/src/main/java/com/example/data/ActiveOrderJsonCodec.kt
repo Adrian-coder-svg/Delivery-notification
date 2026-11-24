@@ -89,7 +89,7 @@ object ActiveOrderJsonCodec {
         deliveredAtMillis = obj.optLongOrNull("deliveredAtMillis"),
         autoDismissAtMillis = obj.optLongOrNull("autoDismissAtMillis"),
         isPromotedOngoing = obj.optBoolean("isPromotedOngoing", false),
-        promotionDiagnostic = obj.optStringOrNull("promotionDiagnostic"),
+        promotionDiagnostic = obj.optStringOrNull("promotionDiagnostic") ?: "",
         userDismissed = obj.optBoolean("userDismissed", false),
       )
     }.getOrNull()
