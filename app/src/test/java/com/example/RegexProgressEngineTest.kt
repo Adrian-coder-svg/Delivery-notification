@@ -1,12 +1,17 @@
 package com.example
 
+import com.example.data.ActiveOrderJsonCodec
 import com.example.engine.ParsedNotificationInput
 import com.example.engine.RegexProgressEngine
 import com.example.model.DeliveryStage
+import com.example.model.LiveOrderState
+import com.example.model.MonitoredApp
 import com.example.model.RegexConfig
+import java.util.Calendar
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RegexProgressEngineTest {
@@ -452,5 +457,188 @@ class RegexProgressEngineTest {
       )
     val key2 = engine.resolveOrderKey(updateInput, mapOf(key1 to firstState), config)
     assertEquals(key1, key2)
+  }
+
+  // ---- Third progress scheme: pickup anchor + latest ETA ----
+
+  private fun noonMillis(): Long {
+    return Calendar.getInstance().apply {
+      set(2026, Calendar.NOVEMBER, 24, 12, 0, 0)
+      set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+  }
+
+  private fun evaluateMeituan(
+    text: String,
+    timestampMillis: Long = 1_700_000_000_000L,
+    existingOrder: LiveOrderState? = null,
+    orderKey: String = "com.sankuai.meituan:m:麦当劳",
+  ) = engine.evaluate(
+    input = ParsedNotificationInput(
+      packageName = "com.sankuai.meituan",
+      appName = "美团",
+      title = "麦当劳",
+      text = text,
+      bigText = "",
+      timestampMillis = timestampMillis,
+    ),
+    orderKey = orderKey,
+    existingOrder = existingOrder,
+    config = config,
+    accentColorHex = 0xFFFFC300L,
+    autoDismissSeconds = 300,
+  )
+
+  @Test
+  fun rangeMinutesEtaUsesLatestTime() {
+    val state = evaluateMeituan("骑手配送中，预计 30-45 分钟送达")!!
+    assertEquals(DeliveryStage.DELIVERING, state.stage)
+    assertEquals(45, state.remainingMinutes)
+    assertEquals(45, state.initialMinutes)
+    assertEquals(10, state.progress)
+    assertEquals("45分钟", state.chipShortText)
+    assertTrue(state.matchedRuleName.contains("最晚"))
+  }
+
+  @Test
+  fun clockRangeEtaUsesLatestTime() {
+    val state = evaluateMeituan("骑手配送中，预计 12:30-12:45 送达", timestampMillis = noonMillis())!!
+    assertEquals(DeliveryStage.DELIVERING, state.stage)
+    assertEquals(45, state.remainingMinutes)
+    assertEquals(45, state.initialMinutes)
+    assertEquals("45分钟", state.chipShortText)
+    assertTrue(state.matchedRuleName.contains("最晚"))
+  }
+
+  @Test
+  fun singleClockEta() {
+    val state = evaluateMeituan("骑手配送中，预计 12:30 送达", timestampMillis = noonMillis())!!
+    assertEquals(DeliveryStage.DELIVERING, state.stage)
+    assertEquals(30, state.remainingMinutes)
+    assertEquals(30, state.initialMinutes)
+  }
+
+  @Test
+  fun clockRangeEtaInsideWindow() {
+    val state =
+      evaluateMeituan(
+        "骑手配送中，预计 12:30-12:45 送达",
+        timestampMillis = noonMillis() + 35 * 60_000L,
+      )!!
+    assertEquals(10, state.remainingMinutes)
+  }
+
+  @Test
+  fun pickupOnlySetsDeliveringAndAnchor() {
+    val pickupTime = 1_700_000_000_000L
+    val state = evaluateMeituan("骑手已成功取到商品，正在火速赶往您身边", timestampMillis = pickupTime)!!
+    assertEquals(DeliveryStage.DELIVERING, state.stage)
+    assertEquals(50, state.progress)
+    assertEquals("已取货", state.chipShortText)
+    assertEquals(pickupTime, state.pickupAtMillis)
+    assertTrue(state.matchedRuleName.contains("骑手已取货"))
+  }
+
+  @Test
+  fun pickupAnchorsLaterEtaBaseline() {
+    val pickupTime = 1_700_000_000_000L
+    val pickedUp = evaluateMeituan("骑手已成功取到商品", timestampMillis = pickupTime)!!
+    assertEquals(DeliveryStage.DELIVERING, pickedUp.stage)
+    assertEquals(pickupTime, pickedUp.pickupAtMillis)
+
+    // 10 minutes after pickup the ETA says 20 minutes left: the baseline is the
+    // 30-minute span from pickup to ETA, so progress is 40, not 10.
+    val delivering =
+      evaluateMeituan(
+        "骑手正前往目的地，预计20分钟送达",
+        timestampMillis = pickupTime + 10 * 60_000L,
+        existingOrder = pickedUp,
+      )!!
+    assertEquals(30, delivering.initialMinutes)
+    assertEquals(20, delivering.remainingMinutes)
+    assertEquals(40, delivering.progress)
+    assertEquals(pickupTime, delivering.pickupAtMillis)
+  }
+
+  @Test
+  fun pickupAndRangeInOneNotification() {
+    val noon = noonMillis()
+    val state =
+      evaluateMeituan("骑手已成功取到商品，预计 12:30-12:45 送达", timestampMillis = noon)!!
+    assertEquals(DeliveryStage.DELIVERING, state.stage)
+    assertEquals(45, state.remainingMinutes)
+    assertEquals(45, state.initialMinutes)
+    assertEquals(noon, state.pickupAtMillis)
+    assertTrue(state.matchedRuleName.contains("最晚"))
+  }
+
+  // ---- 淘宝闪购 preset ----
+
+  @Test
+  fun taobaoFlashPurchasePresetExists() {
+    val preset = MonitoredApp.PRESETS.firstOrNull { it.packageName == "com.taobao.taobao" }
+    assertNotNull(preset)
+    assertEquals("淘宝闪购", preset!!.displayName)
+    assertEquals(0xFFFF5000L, preset.accentColorHex)
+    assertTrue(preset.enabled)
+    assertTrue(preset.isPreset)
+  }
+
+  @Test
+  fun taobaoOrderKeysByMerchant() {
+    val input =
+      ParsedNotificationInput(
+        packageName = "com.taobao.taobao",
+        appName = "淘宝闪购",
+        title = "麦当劳",
+        text = "商家已接单，商家备餐中",
+        bigText = "",
+        timestampMillis = 1_700_000_000_000L,
+      )
+    val key = engine.resolveOrderKey(input, emptyMap(), config)
+    assertEquals("com.taobao.taobao:m:麦当劳", key)
+  }
+
+  // ---- Order persistence codec ----
+
+  @Test
+  fun activeOrderCodecRoundTrip() {
+    val original =
+      LiveOrderState(
+        orderKey = "com.taobao.taobao:m:麦当劳",
+        notificationId = 41234,
+        packageName = "com.taobao.taobao",
+        appName = "淘宝闪购",
+        accentColorHex = 0xFFFF5000L,
+        merchantName = "麦当劳（中关村店）",
+        pickupAtMillis = 1_700_000_000_000L,
+        sourceNotificationKey = "0|com.taobao.taobao|99|null|99",
+        title = "麦当劳",
+        contentText = "骑手已成功取到商品，预计 12:30-12:45 送达",
+        stage = DeliveryStage.DELIVERING,
+        progress = 40,
+        chipShortText = "45分钟",
+        initialMinutes = 45,
+        remainingMinutes = 45,
+        initialDistanceMeters = 2500,
+        remainingDistanceMeters = 1200,
+        etaTimestampMillis = 1_700_000_270_000L,
+        matchedRuleName = "Stage 2 · 预计送达最晚时间",
+        lastUpdatedMillis = 1_700_000_060_000L,
+        deliveredAtMillis = null,
+        autoDismissAtMillis = null,
+        isPromotedOngoing = true,
+        promotionDiagnostic = "Android 16 ProgressStyle + Now Bar 已激活 (Promoted)",
+        userDismissed = false,
+      )
+    val decoded = ActiveOrderJsonCodec.decode(ActiveOrderJsonCodec.encode(listOf(original)))
+    assertEquals(listOf(original), decoded)
+  }
+
+  @Test
+  fun activeOrderCodecSkipsCorruptEntries() {
+    val decoded = ActiveOrderJsonCodec.decode("[{\"orderKey\": 123}, {\"nope\": true}]")
+    assertEquals(emptyList<LiveOrderState>(), decoded)
+    assertEquals(emptyList<LiveOrderState>(), ActiveOrderJsonCodec.decode("not json"))
   }
 }
