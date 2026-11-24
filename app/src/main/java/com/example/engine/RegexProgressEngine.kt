@@ -38,34 +38,188 @@ class RegexProgressEngine {
   private val orderIdRegex =
     Regex("(?:订单号[:：]?\\s*([A-Za-z0-9-]{4,18})|#(\\d{1,6})|取餐码[:：]?\\s*([A-Za-z0-9-]{2,10}))")
 
+  /**
+   * Resolve which live order a notification belongs to, so that one real order keeps
+   * updating the SAME live notification instead of spawning a new one per status push,
+   * while concurrent orders stay separate.
+   *
+   * Priority:
+   * 1. An already-resolved order key (the monitor screen passes orderKey back as the
+   *    hint when simulating the next stage, so it must be used as-is).
+   * 2. An explicit order id in the text (`#1234`, `订单号: ...`, `取餐码: ...`).
+   * 3. The merchant name (title first, then body). Same merchant + same app = same
+   *    order; a fresh "new order" signal while that merchant's order is already
+   *    DELIVERING opens a numbered key (`<base>#2`, `#3`, ...) so two orders from
+   *    the same merchant coexist.
+   * 4. The text mentions the merchant of an existing active order.
+   * 5. Package default key, with the same "new order while delivering" split.
+   */
   fun resolveOrderKey(
     input: ParsedNotificationInput,
     existingOrders: Map<String, LiveOrderState>,
+    config: RegexConfig = RegexConfig(),
   ): String {
+    val packageName = input.packageName
+    val hint = input.orderHintKey
+
+    // 1. Already a full order key — use it unchanged.
+    if (
+      !hint.isNullOrBlank() &&
+        (hint.startsWith("$packageName:") || hint.startsWith("$packageName#"))
+    ) {
+      return hint
+    }
+
     val combined = input.combinedText
+
+    // 2. Explicit order id.
     val extractedId = orderIdRegex.find(combined)?.groupValues
       ?.drop(1)
       ?.firstOrNull { it.isNotBlank() }
 
     if (!extractedId.isNullOrBlank()) {
-      return "${input.packageName}#$extractedId"
+      return "$packageName#$extractedId"
     }
 
-    if (!input.orderHintKey.isNullOrBlank()) {
-      return "${input.packageName}:${input.orderHintKey}"
+    // 3. Merchant name from this notification.
+    val merchant = extractMerchantName(input)
+    if (!merchant.isNullOrBlank()) {
+      return resolveBaseKey(
+        baseKey = "$packageName:m:$merchant",
+        input = input,
+        existingOrders = existingOrders,
+        config = config,
+      )
     }
 
-    // Correlate with an existing non-dismissed active order for the same package
-    val activeForPackage = existingOrders.values
-      .filter { it.packageName == input.packageName && !it.userDismissed }
-      .sortedByDescending { it.lastUpdatedMillis }
+    // 4. The text mentions the merchant of an existing active order.
+    val mentionedOrder =
+      existingOrders.values
+        .filter {
+          it.packageName == packageName &&
+            !it.userDismissed &&
+            !it.merchantName.isNullOrBlank() &&
+            combined.contains(it.merchantName!!)
+        }
+        .maxByOrNull { it.lastUpdatedMillis }
+    if (mentionedOrder != null) return mentionedOrder.orderKey
 
-    val matchingTitleOrder = activeForPackage.firstOrNull { existing ->
-      existing.stage != DeliveryStage.DELIVERED ||
-        (input.timestampMillis - existing.lastUpdatedMillis) < 120_000L
+    // 5. Package default.
+    return resolveBaseKey(
+      baseKey = "$packageName:default",
+      input = input,
+      existingOrders = existingOrders,
+      config = config,
+    )
+  }
+
+  /**
+   * Attach to the latest active order under [baseKey], unless this notification looks
+   * like a brand-new order starting (stage 1 only) while the latest order has already
+   * moved past PREPARING — then open the next numbered key so both orders coexist.
+   */
+  private fun resolveBaseKey(
+    baseKey: String,
+    input: ParsedNotificationInput,
+    existingOrders: Map<String, LiveOrderState>,
+    config: RegexConfig,
+  ): String {
+    val actives =
+      existingOrders.values
+        .filter {
+          it.packageName == input.packageName &&
+            !it.userDismissed &&
+            (it.orderKey == baseKey || it.orderKey.startsWith("$baseKey#"))
+        }
+        .sortedByDescending { it.lastUpdatedMillis }
+    if (actives.isEmpty()) return baseKey
+
+    val latest = actives.first()
+    if (looksLikeNewOrderStart(input.combinedText, config) && latest.stage != DeliveryStage.PREPARING) {
+      var suffix = 2
+      while (existingOrders.containsKey("$baseKey#$suffix")) suffix++
+      return "$baseKey#$suffix"
     }
+    return latest.orderKey
+  }
 
-    return matchingTitleOrder?.orderKey ?: "${input.packageName}:default"
+  /** Stage 1 only — no delivery/delivered signal in the same text. */
+  private fun looksLikeNewOrderStart(text: String, config: RegexConfig): Boolean {
+    if (matchesSafe(config.stage3DeliveredRegex, text)) return false
+    if (findSafe(config.stage2EtaRegex, text) != null) return false
+    if (findSafe(config.stage2DistanceRegex, text) != null) return false
+    if (matchesSafe(config.stage2StaticDeliveringRegex, text)) return false
+    return matchesSafe(config.stage1PreparingRegex, text)
+  }
+
+  /**
+   * Extract the merchant (store) name from a notification. Meituan/Ele.me usually put
+   * the merchant name in the notification title; fall back to patterns in the body.
+   * Returns null when nothing looks like a merchant — a missing merchant must never
+   * be guessed, because a wrong name would merge unrelated orders.
+   */
+  fun extractMerchantName(input: ParsedNotificationInput): String? {
+    merchantFromTitle(input.title, input.appName)?.let { return it }
+    merchantFromText(input.text, input.appName)?.let { return it }
+    merchantFromText(input.bigText, input.appName)?.let { return it }
+    return null
+  }
+
+  /** The notification title is the merchant name unless it is generic/status text. */
+  private fun merchantFromTitle(title: String, appName: String): String? {
+    val trimmed = title.trim()
+    if (!isPlausibleMerchant(trimmed, appName)) return null
+    if (trimmed.length > 24) return null
+    return trimmed
+  }
+
+  private fun merchantFromText(text: String, appName: String): String? {
+    if (text.isBlank()) return null
+    // 【麦当劳】
+    Regex("""【([^】]{2,20})】""")
+      .find(text)
+      ?.groupValues
+      ?.getOrNull(1)
+      ?.trim()
+      ?.takeIf { isPlausibleMerchant(it, appName) }
+      ?.let { return it }
+    // 麦当劳已接单 / 麦当劳正在备餐 / 麦当劳配送中 (merchant directly before a status verb)
+    Regex("""([^\s,，。：:；;\n]{2,20})(已接单|正在备餐|已出餐|配送中|已送达|预计|骑手已|商家已)""")
+      .find(text)
+      ?.groupValues
+      ?.getOrNull(1)
+      ?.trim()
+      ?.takeIf { isPlausibleMerchant(it, appName) }
+      ?.let { return it }
+    // 麦当劳的订单已接单
+    Regex("""([^\s,，。：:；;\n]{2,20})的订单(已|正|即)""")
+      .find(text)
+      ?.groupValues
+      ?.getOrNull(1)
+      ?.trim()
+      ?.takeIf { isPlausibleMerchant(it, appName) }
+      ?.let { return it }
+    return null
+  }
+
+  private fun isPlausibleMerchant(name: String, appName: String): Boolean {
+    if (name.length < 2 || name.length > 24) return false
+    if (name.equals(appName, ignoreCase = true)) return false
+    if (GENERIC_MERCHANT_WORDS.any { name.contains(it) }) return false
+    if (name.contains("订单") || name.contains("通知")) return false
+    return true
+  }
+
+  /**
+   * Display title for the live notification: keep a real merchant title, replace a
+   * generic title (e.g. "美团外卖") with the extracted merchant, fall back to the
+   * raw title, and return null when there is neither (per-stage fallback applies).
+   */
+  private fun resolveDisplayTitle(title: String, merchant: String?, appName: String): String? {
+    val trimmed = title.trim()
+    if (trimmed.isEmpty()) return merchant
+    if (merchant != null && merchantFromTitle(trimmed, appName) == null) return merchant
+    return trimmed
   }
 
   fun evaluate(
@@ -85,6 +239,11 @@ class RegexProgressEngine {
     val activeExisting =
       existingOrder?.takeIf { it.stage != DeliveryStage.DELIVERED && !it.userDismissed }
 
+    // Merchant for order keying/display: extracted from this notification, or kept
+    // from the existing order when this update carries no merchant name.
+    val merchant = extractMerchantName(input) ?: existingOrder?.merchantName
+    val titleOrMerchant = resolveDisplayTitle(input.title, merchant, input.appName)
+
     // 1. Check Stage 3 (Delivered - 100%)
     if (matchesSafe(config.stage3DeliveredRegex, fullText)) {
       val now = input.timestampMillis
@@ -94,7 +253,8 @@ class RegexProgressEngine {
         packageName = input.packageName,
         appName = input.appName,
         accentColorHex = accentColorHex,
-        title = input.title.ifBlank { "${input.appName}订单" },
+        merchantName = merchant,
+        title = titleOrMerchant ?: "${input.appName}订单",
         contentText = displayBody,
         stage = DeliveryStage.DELIVERED,
         progress = 100,
@@ -132,7 +292,8 @@ class RegexProgressEngine {
           packageName = input.packageName,
           appName = input.appName,
           accentColorHex = accentColorHex,
-          title = input.title.ifBlank { "${input.appName}配送中" },
+          merchantName = merchant,
+          title = titleOrMerchant ?: "${input.appName}配送中",
           contentText = displayBody,
           stage = DeliveryStage.DELIVERING,
           progress = progress,
@@ -181,7 +342,8 @@ class RegexProgressEngine {
           packageName = input.packageName,
           appName = input.appName,
           accentColorHex = accentColorHex,
-          title = input.title.ifBlank { "${input.appName}配送中" },
+          merchantName = merchant,
+          title = titleOrMerchant ?: "${input.appName}配送中",
           contentText = displayBody,
           stage = DeliveryStage.DELIVERING,
           progress = progress,
@@ -211,7 +373,8 @@ class RegexProgressEngine {
         packageName = input.packageName,
         appName = input.appName,
         accentColorHex = accentColorHex,
-        title = input.title.ifBlank { "${input.appName}配送中" },
+        merchantName = merchant,
+        title = titleOrMerchant ?: "${input.appName}配送中",
         contentText = displayBody,
         stage = DeliveryStage.DELIVERING,
         progress = preservedProgress,
@@ -237,7 +400,8 @@ class RegexProgressEngine {
         packageName = input.packageName,
         appName = input.appName,
         accentColorHex = accentColorHex,
-        title = input.title.ifBlank { "${input.appName}备餐中" },
+        merchantName = merchant,
+        title = titleOrMerchant ?: "${input.appName}备餐中",
         contentText = displayBody,
         stage = DeliveryStage.PREPARING,
         progress = 0,
@@ -381,6 +545,16 @@ class RegexProgressEngine {
 
   companion object {
     private const val BASE_NOTIFICATION_ID = 41_000
+
+    /** Words that mark a title/body as status or promo text, never a merchant name. */
+    private val GENERIC_MERCHANT_WORDS =
+      listOf(
+        "已接单", "已付款", "备餐", "配送", "送达", "骑手", "预计", "分钟", "公里",
+        "完成", "感谢", "外卖", "跑腿", "取餐", "送餐", "正在", "即将", "到达",
+        "出发", "已取", "已出", "到店", "自取", "打包", "催单", "退款", "取消",
+        "超时", "准时", "评价", "红包", "优惠", "神券", "会员",
+      )
+
     fun isValidRegex(pattern: String): Boolean =
       pattern.isNotBlank() && runCatching { Regex(pattern) }.isSuccess
   }
