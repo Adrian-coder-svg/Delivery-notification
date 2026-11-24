@@ -468,16 +468,24 @@ class RegexProgressEngineTest {
     }.timeInMillis
   }
 
+  private fun atTime(hour: Int, minute: Int, second: Int = 0): Long {
+    return Calendar.getInstance().apply {
+      set(2026, Calendar.NOVEMBER, 24, hour, minute, second)
+      set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
+  }
+
   private fun evaluateMeituan(
     text: String,
     timestampMillis: Long = 1_700_000_000_000L,
     existingOrder: LiveOrderState? = null,
     orderKey: String = "com.sankuai.meituan:m:麦当劳",
+    title: String = "麦当劳",
   ) = engine.evaluate(
     input = ParsedNotificationInput(
       packageName = "com.sankuai.meituan",
       appName = "美团",
-      title = "麦当劳",
+      title = title,
       text = text,
       bigText = "",
       timestampMillis = timestampMillis,
@@ -533,7 +541,7 @@ class RegexProgressEngineTest {
     val pickupTime = 1_700_000_000_000L
     val state = evaluateMeituan("骑手已成功取到商品，正在火速赶往您身边", timestampMillis = pickupTime)!!
     assertEquals(DeliveryStage.DELIVERING, state.stage)
-    assertEquals(50, state.progress)
+    assertEquals(20, state.progress)
     assertEquals("已取货", state.chipShortText)
     assertEquals(pickupTime, state.pickupAtMillis)
     assertTrue(state.matchedRuleName.contains("骑手已取货"))
@@ -546,8 +554,8 @@ class RegexProgressEngineTest {
     assertEquals(DeliveryStage.DELIVERING, pickedUp.stage)
     assertEquals(pickupTime, pickedUp.pickupAtMillis)
 
-    // 10 minutes after pickup the ETA says 20 minutes left: the baseline is the
-    // 30-minute span from pickup to ETA, so progress is 40, not 10.
+    // 10 minutes after pickup the ETA says 20 minutes left: the anchored window
+    // spans 30 minutes from pickup to ETA, so progress is 20 + 70 * 10/30 = 43.
     val delivering =
       evaluateMeituan(
         "骑手正前往目的地，预计20分钟送达",
@@ -556,7 +564,7 @@ class RegexProgressEngineTest {
       )!!
     assertEquals(30, delivering.initialMinutes)
     assertEquals(20, delivering.remainingMinutes)
-    assertEquals(40, delivering.progress)
+    assertEquals(43, delivering.progress)
     assertEquals(pickupTime, delivering.pickupAtMillis)
   }
 
@@ -568,8 +576,126 @@ class RegexProgressEngineTest {
     assertEquals(DeliveryStage.DELIVERING, state.stage)
     assertEquals(45, state.remainingMinutes)
     assertEquals(45, state.initialMinutes)
+    assertEquals(20, state.progress)
     assertEquals(noon, state.pickupAtMillis)
     assertTrue(state.matchedRuleName.contains("最晚"))
+  }
+
+  // ---- Node-based stage scheme: 0% / 10% / 20%~90% / 100% ----
+
+  @Test
+  fun realMeituanOrderFollowsNodeScheme() {
+    // The real 2026-11-24 lunch order from 益丰大药房（长寿路店）.
+    val accepted = evaluateMeituan(
+      "您的订单预计今天 12:09~12:24送达，请您耐心等待。",
+      timestampMillis = atTime(11, 54, 48),
+      orderKey = "com.sankuai.meituan:m:益丰大药房",
+      title = "商家已接单",
+    )!!
+    assertEquals(DeliveryStage.PREPARING, accepted.stage)
+    assertEquals(0, accepted.progress)
+    assertEquals("已接单", accepted.chipShortText)
+    assertEquals(atTime(12, 24), accepted.etaTimestampMillis)
+    assertEquals(29, accepted.remainingMinutes)
+
+    val assigned = evaluateMeituan(
+      "骑手正赶往商家，请您耐心等待",
+      timestampMillis = atTime(11, 55, 55),
+      existingOrder = accepted,
+      orderKey = "com.sankuai.meituan:m:益丰大药房",
+      title = "骑手已接单",
+    )!!
+    assertEquals(DeliveryStage.PREPARING, assigned.stage)
+    assertEquals(10, assigned.progress)
+    assertEquals("骑手已接单", assigned.chipShortText)
+    assertEquals(atTime(12, 24), assigned.etaTimestampMillis)
+
+    val pickedUp = evaluateMeituan(
+      "您的商品已从益丰大药房（长寿路店）取到，将尽快为您送达",
+      timestampMillis = atTime(12, 7, 56),
+      existingOrder = assigned,
+      orderKey = "com.sankuai.meituan:m:益丰大药房",
+      title = "骑手已成功取到商品",
+    )!!
+    assertEquals(DeliveryStage.DELIVERING, pickedUp.stage)
+    assertEquals(20, pickedUp.progress)
+    assertEquals(atTime(12, 7, 56), pickedUp.pickupAtMillis)
+    assertEquals(16, pickedUp.remainingMinutes)
+    assertEquals("16分钟", pickedUp.chipShortText)
+
+    // Had it not been delivered early, the 12:15 tick would sit at 50%.
+    val midDelivery = engine.applyMinuteTick(pickedUp, atTime(12, 15))
+    assertEquals(50, midDelivery.progress)
+    assertEquals(9, midDelivery.remainingMinutes)
+    assertEquals("9分钟", midDelivery.chipShortText)
+
+    val delivered = evaluateMeituan(
+      "您的益丰大药房（长寿路店）订单已送达",
+      timestampMillis = atTime(12, 8, 44),
+      existingOrder = pickedUp,
+      orderKey = "com.sankuai.meituan:m:益丰大药房",
+      title = "商品已送达",
+    )!!
+    assertEquals(DeliveryStage.DELIVERED, delivered.stage)
+    assertEquals(100, delivered.progress)
+  }
+
+  @Test
+  fun etaRevisedLaterNeverRegressesProgress() {
+    val noon = noonMillis()
+    val pickedUp =
+      evaluateMeituan("骑手已成功取到商品，预计 12:15-12:30 送达", timestampMillis = noon)!!
+    assertEquals(20, pickedUp.progress)
+
+    // At 12:20 the anchored progress is 20 + 70 * 20/30 = 66.
+    val atTwelveTwenty = engine.applyMinuteTick(pickedUp, noon + 20 * 60_000L)
+    assertEquals(66, atTwelveTwenty.progress)
+
+    // Meituan revises the ETA to 13:00: the fresh interpolation would be 43,
+    // but progress must not go backwards.
+    val revised = evaluateMeituan(
+      "骑手配送中，预计 12:30-13:00 送达",
+      timestampMillis = noon + 20 * 60_000L,
+      existingOrder = atTwelveTwenty,
+    )!!
+    assertEquals(66, revised.progress)
+    assertEquals(noon + 60 * 60_000L, revised.etaTimestampMillis)
+  }
+
+  @Test
+  fun overdueDeliveryHoldsAt90Percent() {
+    val noon = noonMillis()
+    val pickedUp =
+      evaluateMeituan("骑手已成功取到商品，预计 12:15-12:30 送达", timestampMillis = noon)!!
+    val overdue = engine.applyMinuteTick(pickedUp, noon + 35 * 60_000L)
+    assertEquals(90, overdue.progress)
+    assertEquals(0, overdue.remainingMinutes)
+    assertEquals("即将送达", overdue.chipShortText)
+  }
+
+  @Test
+  fun pickupWithoutEtaStaysAt20Percent() {
+    val pickupTime = 1_700_000_000_000L
+    val pickedUp = evaluateMeituan("骑手已成功取到商品", timestampMillis = pickupTime)!!
+    assertEquals(20, pickedUp.progress)
+    val ticked = engine.applyMinuteTick(pickedUp, pickupTime + 10 * 60_000L)
+    assertEquals(20, ticked.progress)
+  }
+
+  @Test
+  fun previewShowsNodeProgress() {
+    val rider = engine.preview("骑手已接单", config)
+    assertTrue(rider.matched)
+    assertEquals(DeliveryStage.PREPARING, rider.stage)
+    assertEquals(10, rider.progress)
+    val pickup = engine.preview("骑手已成功取到商品", config)
+    assertTrue(pickup.matched)
+    assertEquals(DeliveryStage.DELIVERING, pickup.stage)
+    assertEquals(20, pickup.progress)
+    val merchant = engine.preview("商家已接单", config)
+    assertTrue(merchant.matched)
+    assertEquals(DeliveryStage.PREPARING, merchant.stage)
+    assertEquals(0, merchant.progress)
   }
 
   // ---- 淘宝闪购 preset ----
