@@ -42,7 +42,7 @@ jobs:
             echo "DEBUG_KEYSTORE_BASE64 secret is not set" >&2
             exit 1
           fi
-          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -di > ~/.android/debug.keystore
 
       - name: Run unit tests
         run: gradle testDebugUnitTest --stacktrace
