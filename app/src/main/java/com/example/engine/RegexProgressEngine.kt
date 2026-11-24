@@ -49,14 +49,21 @@ class RegexProgressEngine {
 
   // Built-in (non-editable) patterns for the pickup-anchored progress scheme:
   // the rider picking up the goods, and an ETA given as a range or a clock time.
+  // The ETA may carry a day word ("预计今天 12:09~12:24送达").
   private val pickupRegex =
     Regex("(骑手已成功取到商品|骑手已取到商品|骑手已取货|骑手已取餐|骑手已取到餐|已取到商品)")
   private val etaRangeMinutesRegex =
-    Regex("(?:预计|最晚)\\s*(\\d+)\\s*[-~～到]\\s*(\\d+)\\s*(分钟|min)")
+    Regex("(?:预计|最晚)(?:今天|今日|当天)?\\s*(\\d+)\\s*[-~～到]\\s*(\\d+)\\s*(分钟|min)")
   private val etaRangeClockRegex =
-    Regex("(?:预计|最晚)\\s*(\\d{1,2})[:：](\\d{2})\\s*[-~～到]\\s*(\\d{1,2})[:：](\\d{2})")
+    Regex("(?:预计|最晚)(?:今天|今日|当天)?\\s*(\\d{1,2})[:：](\\d{2})\\s*[-~～到]\\s*(\\d{1,2})[:：](\\d{2})")
   private val etaClockRegex =
-    Regex("(?:预计|最晚)\\s*(\\d{1,2})[:：](\\d{2})")
+    Regex("(?:预计|最晚)(?:今天|今日|当天)?\\s*(\\d{1,2})[:：](\\d{2})")
+
+  // Node signals for the stage progress scheme: merchant accepted = 0%, rider
+  // assigned = 10%, pickup = 20%, delivered = 100%. Plain phrases so they keep
+  // matching even when the same notification also carries an ETA window.
+  private val riderAssignedPhrases = listOf("骑手已接单", "骑手正赶往商家")
+  private val merchantAcceptedPhrases = listOf("商家已接单")
 
   // Compiled user regexes, cached by pattern string: matchesSafe/findSafe used to
   // recompile all five rules on every notification.
@@ -279,6 +286,19 @@ class RegexProgressEngine {
   }
 
   /**
+   * The ETA end carried by this text, if any: a range/clock ETA from
+   * parseLatestEta, else a minutes ETA ("预计 30 分钟") as now + minutes.
+   * Used to RECORD the delivery window on status pushes (merchant/rider
+   * accepted, pickup) without letting it drive progress before pickup.
+   */
+  private fun etaEndMillis(text: String, nowMillis: Long, config: RegexConfig): Long? {
+    parseLatestEta(text, nowMillis)?.let { return it.etaMillis }
+    val minutes =
+      findSafe(config.stage2EtaRegex, text)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    return minutes?.let { nowMillis + it * 60_000L }
+  }
+
+  /**
    * Minutes from [nowMillis] to today's [hour]:[minute] (device local time).
    * A time just passed (within an hour) means the delivery is overdue, so the
    * remaining time clamps to 1 minute; a time long passed is treated as tomorrow.
@@ -371,12 +391,182 @@ class RegexProgressEngine {
       )
     }
 
-    // 2. Check Stage 2 Case C: Latest ETA — range or clock time ("预计 30-45 分钟",
+    // 2. Pickup signal: the rider has the goods — the 20% node. From here the
+    // progress interpolates toward the latest ETA end (90%). An ETA in this same
+    // text, or one recorded earlier (e.g. from the merchant-accepted push),
+    // anchors the 90% node; without any ETA the order holds at 20%.
+    if (hasPickupSignal) {
+      val pickupAt = pickupAtMillis ?: now
+      val latestEta = parseLatestEta(fullText, now)
+      val etaEnd = latestEta?.etaMillis
+        ?: etaEndMillis(fullText, now, config)
+        ?: existingOrder?.etaTimestampMillis
+      val progress =
+        if (etaEnd != null) calculateAnchoredProgress(pickupAt, etaEnd, now) else 20
+      val remainingMinutes =
+        etaEnd?.let { ((it - now) / 60_000L).toInt().coerceAtLeast(0) }
+          ?: existingOrder?.remainingMinutes
+      val initialMinutes =
+        existingOrder?.initialMinutes
+          ?: etaEnd?.let { ((it - pickupAt) / 60_000L).toInt().coerceAtLeast(1) }
+      val etaLabel =
+        latestEta?.label ?: etaEnd?.let {
+          val cal = Calendar.getInstance().apply { timeInMillis = it }
+          "最晚 ${cal.get(Calendar.HOUR_OF_DAY)}:${cal.get(Calendar.MINUTE).toString().padStart(2, '0')}"
+        }
+      return LiveOrderState(
+        orderKey = orderKey,
+        notificationId = notificationId,
+        packageName = input.packageName,
+        appName = input.appName,
+        accentColorHex = accentColorHex,
+        merchantName = merchant,
+        pickupAtMillis = pickupAt,
+        sourceNotificationKey = sourceKey,
+        title = titleOrMerchant ?: "${input.appName}配送中",
+        contentText = displayBody,
+        stage = DeliveryStage.DELIVERING,
+        progress = progress,
+        chipShortText = if (remainingMinutes != null) "${remainingMinutes}分钟" else "已取货",
+        initialMinutes = initialMinutes,
+        remainingMinutes = remainingMinutes,
+        initialDistanceMeters = existingOrder?.initialDistanceMeters,
+        remainingDistanceMeters = existingOrder?.remainingDistanceMeters,
+        etaTimestampMillis = etaEnd ?: existingOrder?.etaTimestampMillis,
+        matchedRuleName =
+          if (etaEnd != null) "Stage 2 · 骑手已取货 (锚点 20%~90%，$etaLabel)"
+          else "Stage 2 · 骑手已取货",
+        lastUpdatedMillis = now,
+        userDismissed = false,
+      )
+    }
+
+    // 3. Rider assigned — the 10% node. Still PREPARING (goods not picked up
+    // yet). An ETA in this text is recorded for later, but does not drive
+    // progress yet. A late-arriving rider-assigned push must not drag an
+    // already-delivering order back, so it falls through to the ETA handling.
+    if (riderAssignedPhrases.any { fullText.contains(it) }) {
+      if (activeExisting?.stage != DeliveryStage.DELIVERING) {
+        val recordedEtaEnd = etaEndMillis(fullText, now, config)
+          ?: existingOrder?.etaTimestampMillis
+        val remainingMinutes =
+          recordedEtaEnd?.let { ((it - now) / 60_000L).toInt().coerceAtLeast(0) }
+            ?: existingOrder?.remainingMinutes
+        return LiveOrderState(
+          orderKey = orderKey,
+          notificationId = notificationId,
+          packageName = input.packageName,
+          appName = input.appName,
+          accentColorHex = accentColorHex,
+          merchantName = merchant,
+          pickupAtMillis = pickupAtMillis,
+          sourceNotificationKey = sourceKey,
+          title = titleOrMerchant ?: "${input.appName}备餐中",
+          contentText = displayBody,
+          stage = DeliveryStage.PREPARING,
+          progress = 10,
+          chipShortText = "骑手已接单",
+          initialMinutes = existingOrder?.initialMinutes,
+          remainingMinutes = remainingMinutes,
+          initialDistanceMeters = existingOrder?.initialDistanceMeters,
+          remainingDistanceMeters = existingOrder?.remainingDistanceMeters,
+          etaTimestampMillis = recordedEtaEnd,
+          matchedRuleName = "Stage 1 · 骑手已接单 (10%)",
+          lastUpdatedMillis = now,
+          userDismissed = false,
+        )
+      }
+    }
+
+    // 4. Merchant accepted — the 0% node. Same rule as above: an ETA in this
+    // text is recorded for the later pickup-anchored interpolation, but the
+    // progress stays 0 until the rider picks up the goods.
+    if (merchantAcceptedPhrases.any { fullText.contains(it) }) {
+      if (activeExisting?.stage != DeliveryStage.DELIVERING) {
+        val recordedEtaEnd = etaEndMillis(fullText, now, config)
+          ?: existingOrder?.etaTimestampMillis
+        val remainingMinutes =
+          recordedEtaEnd?.let { ((it - now) / 60_000L).toInt().coerceAtLeast(0) }
+            ?: existingOrder?.remainingMinutes
+        return LiveOrderState(
+          orderKey = orderKey,
+          notificationId = notificationId,
+          packageName = input.packageName,
+          appName = input.appName,
+          accentColorHex = accentColorHex,
+          merchantName = merchant,
+          pickupAtMillis = pickupAtMillis,
+          sourceNotificationKey = sourceKey,
+          title = titleOrMerchant ?: "${input.appName}备餐中",
+          contentText = displayBody,
+          stage = DeliveryStage.PREPARING,
+          progress = 0,
+          chipShortText = "已接单",
+          initialMinutes = existingOrder?.initialMinutes,
+          remainingMinutes = remainingMinutes,
+          initialDistanceMeters = existingOrder?.initialDistanceMeters,
+          remainingDistanceMeters = existingOrder?.remainingDistanceMeters,
+          etaTimestampMillis = recordedEtaEnd,
+          matchedRuleName = "Stage 1 · 商家已接单 (0%)",
+          lastUpdatedMillis = now,
+          userDismissed = false,
+        )
+      }
+    }
+
+    // 5. Check Stage 2 Case C: Latest ETA — range or clock time ("预计 30-45 分钟",
     // "预计 12:30-12:45", "预计 12:30 送达"). The baseline spans from the pickup
     // moment when one is known, so progress reflects real elapsed time.
     val latestEta = parseLatestEta(fullText, now)
     if (latestEta != null) {
       val remainingMinutes = latestEta.remainingMinutes
+      // Already delivering with a pickup anchor: interpolate 20%~90% toward
+      // this latest ETA end, never letting progress go backwards when the ETA
+      // is revised later.
+      val delivering = activeExisting?.takeIf { it.stage == DeliveryStage.DELIVERING }
+      if (delivering != null && delivering.pickupAtMillis != null) {
+        val anchored =
+          calculateAnchoredProgress(delivering.pickupAtMillis, latestEta.etaMillis, now)
+        val progress = maxOf(delivering.progress, anchored)
+        return LiveOrderState(
+          orderKey = orderKey,
+          notificationId = notificationId,
+          packageName = input.packageName,
+          appName = input.appName,
+          accentColorHex = accentColorHex,
+          merchantName = merchant,
+          pickupAtMillis = delivering.pickupAtMillis,
+          sourceNotificationKey = sourceKey,
+          title = titleOrMerchant ?: "${input.appName}配送中",
+          contentText = displayBody,
+          stage = DeliveryStage.DELIVERING,
+          progress = progress,
+          chipShortText = "${remainingMinutes}分钟",
+          initialMinutes = delivering.initialMinutes
+            ?: ((latestEta.etaMillis - delivering.pickupAtMillis) / 60_000L).toInt().coerceAtLeast(1),
+          remainingMinutes = remainingMinutes,
+          initialDistanceMeters = delivering.initialDistanceMeters,
+          remainingDistanceMeters = delivering.remainingDistanceMeters,
+          etaTimestampMillis = latestEta.etaMillis,
+          matchedRuleName = "Stage 2 · 预计送达最晚时间 (锚点 20%~90%，${latestEta.label})",
+          lastUpdatedMillis = now,
+          userDismissed = false,
+        )
+      }
+      // Not delivering yet, and no delivering signal in this text: record the
+      // window, keep the current stage/progress. (A text that also says the
+      // rider is on the way falls through to the first-sighting baseline below.)
+      if (delivering == null && activeExisting != null &&
+        !matchesSafe(config.stage2StaticDeliveringRegex, fullText)
+      ) {
+        return activeExisting.copy(
+          remainingMinutes = remainingMinutes,
+          initialMinutes = activeExisting.initialMinutes ?: remainingMinutes,
+          etaTimestampMillis = latestEta.etaMillis,
+          lastUpdatedMillis = now,
+          matchedRuleName = "Stage 2 · 预计送达最晚时间 (已记录，${latestEta.label})",
+        )
+      }
       val initialMinutes =
         if (activeExisting?.initialMinutes != null) {
           maxOf(activeExisting.initialMinutes, remainingMinutes)
@@ -414,11 +604,55 @@ class RegexProgressEngine {
       )
     }
 
-    // 3. Check Stage 2 Case B: Dynamic ETA (minutes)
+    // 6. Check Stage 2 Case B: Dynamic ETA (minutes)
     val etaMatch = findSafe(config.stage2EtaRegex, fullText)
     if (etaMatch != null) {
       val remainingMinutes = etaMatch.groupValues.getOrNull(1)?.toIntOrNull()?.coerceAtLeast(1)
       if (remainingMinutes != null) {
+        val etaMillis = input.timestampMillis + remainingMinutes * 60_000L
+        // Same three-way handling as the latest-ETA branch above: anchored
+        // interpolation while delivering with a pickup anchor, record-only
+        // before pickup, first-sighting baseline otherwise.
+        val delivering = activeExisting?.takeIf { it.stage == DeliveryStage.DELIVERING }
+        if (delivering != null && delivering.pickupAtMillis != null) {
+          val anchored = calculateAnchoredProgress(delivering.pickupAtMillis, etaMillis, now)
+          val progress = maxOf(delivering.progress, anchored)
+          return LiveOrderState(
+            orderKey = orderKey,
+            notificationId = notificationId,
+            packageName = input.packageName,
+            appName = input.appName,
+            accentColorHex = accentColorHex,
+            merchantName = merchant,
+            pickupAtMillis = delivering.pickupAtMillis,
+            sourceNotificationKey = sourceKey,
+            title = titleOrMerchant ?: "${input.appName}配送中",
+            contentText = displayBody,
+            stage = DeliveryStage.DELIVERING,
+            progress = progress,
+            chipShortText = "${remainingMinutes}分钟",
+            initialMinutes = delivering.initialMinutes
+              ?: ((etaMillis - delivering.pickupAtMillis) / 60_000L).toInt().coerceAtLeast(1),
+            remainingMinutes = remainingMinutes,
+            initialDistanceMeters = delivering.initialDistanceMeters,
+            remainingDistanceMeters = delivering.remainingDistanceMeters,
+            etaTimestampMillis = etaMillis,
+            matchedRuleName = "Stage 2 · 动态时间正则 (锚点 20%~90%)",
+            lastUpdatedMillis = now,
+            userDismissed = false,
+          )
+        }
+        if (delivering == null && activeExisting != null &&
+          !matchesSafe(config.stage2StaticDeliveringRegex, fullText)
+        ) {
+          return activeExisting.copy(
+            remainingMinutes = remainingMinutes,
+            initialMinutes = activeExisting.initialMinutes ?: remainingMinutes,
+            etaTimestampMillis = etaMillis,
+            lastUpdatedMillis = now,
+            matchedRuleName = "Stage 2 · 动态时间正则 (已记录)",
+          )
+        }
         val initialMinutes =
           if (activeExisting?.initialMinutes != null) {
             maxOf(activeExisting.initialMinutes, remainingMinutes)
@@ -431,7 +665,6 @@ class RegexProgressEngine {
             remainingMinutes.coerceAtLeast(1)
           }
         val progress = calculateTimeProgress(initialMinutes, remainingMinutes)
-        val etaMillis = input.timestampMillis + remainingMinutes * 60_000L
         return LiveOrderState(
           orderKey = orderKey,
           notificationId = notificationId,
@@ -458,7 +691,7 @@ class RegexProgressEngine {
       }
     }
 
-    // 4. Check Stage 2 Case B: Dynamic Distance
+    // 7. Check Stage 2 Case B: Dynamic Distance
     val distMatch = findSafe(config.stage2DistanceRegex, fullText)
     if (distMatch != null) {
       val rawValue = distMatch.groupValues.getOrNull(1)?.toDoubleOrNull()
@@ -470,6 +703,24 @@ class RegexProgressEngine {
           } else {
             rawValue.toInt().coerceAtLeast(1)
           }
+        // Already on the anchored scheme: a distance push updates the distance
+        // fields, but progress stays on the pickup-to-ETA time interpolation.
+        val anchoredExisting = activeExisting?.takeIf {
+          it.stage == DeliveryStage.DELIVERING &&
+            it.pickupAtMillis != null && it.etaTimestampMillis != null
+        }
+        val anchorPickup = anchoredExisting?.pickupAtMillis
+        val anchorEta = anchoredExisting?.etaTimestampMillis
+        if (anchoredExisting != null && anchorPickup != null && anchorEta != null) {
+          val anchored = calculateAnchoredProgress(anchorPickup, anchorEta, now)
+          return anchoredExisting.copy(
+            progress = maxOf(anchoredExisting.progress, anchored),
+            initialDistanceMeters = activeExisting?.initialDistanceMeters ?: maxOf(meters, 1500),
+            remainingDistanceMeters = meters,
+            lastUpdatedMillis = now,
+            matchedRuleName = "Stage 2 · 动态距离正则 (锚点 20%~90%)",
+          )
+        }
         val existingInitialDist = activeExisting?.initialDistanceMeters
         val initialDist =
           if (existingInitialDist != null) {
@@ -510,45 +761,13 @@ class RegexProgressEngine {
       }
     }
 
-    // 5. Pickup only (no ETA/distance in this text): the rider has the goods, so the
-    // order is delivering; keep any progress already earned, otherwise 50%.
-    // The pickup moment is recorded so a later ETA can anchor its baseline here.
-    if (hasPickupSignal) {
-      val preservedProgress =
-        existingOrder
-          ?.takeIf { it.stage == DeliveryStage.DELIVERING && it.progress > 0 }
-          ?.progress
-          ?: 50
-      return LiveOrderState(
-        orderKey = orderKey,
-        notificationId = notificationId,
-        packageName = input.packageName,
-        appName = input.appName,
-        accentColorHex = accentColorHex,
-        merchantName = merchant,
-        pickupAtMillis = pickupAtMillis,
-        sourceNotificationKey = sourceKey,
-        title = titleOrMerchant ?: "${input.appName}配送中",
-        contentText = displayBody,
-        stage = DeliveryStage.DELIVERING,
-        progress = preservedProgress,
-        chipShortText = "已取货",
-        initialMinutes = existingOrder?.initialMinutes,
-        remainingMinutes = existingOrder?.remainingMinutes,
-        initialDistanceMeters = existingOrder?.initialDistanceMeters,
-        remainingDistanceMeters = existingOrder?.remainingDistanceMeters,
-        etaTimestampMillis = existingOrder?.etaTimestampMillis,
-        matchedRuleName = "Stage 2 · 骑手已取货",
-        lastUpdatedMillis = now,
-        userDismissed = false,
-      )
-    }
-
-    // 6. Check Stage 2 Case A: Static Delivering (no specific time/distance)
+    // 8. Check Stage 2 Case A: Static Delivering (no specific time/distance)
     if (matchesSafe(config.stage2StaticDeliveringRegex, fullText)) {
+      // Keep the progress already earned (e.g. an anchored 20%~90% value);
+      // a static push on its own carries no new information.
       val preservedProgress =
         existingOrder
-          ?.takeIf { it.stage == DeliveryStage.DELIVERING && it.progress > 50 }
+          ?.takeIf { it.stage == DeliveryStage.DELIVERING }
           ?.progress
           ?: 50
       return LiveOrderState(
@@ -576,7 +795,7 @@ class RegexProgressEngine {
       )
     }
 
-    // 7. Check Stage 1: Preparing / Accepted (0%)
+    // 9. Check Stage 1: Preparing / Accepted (0%)
     if (matchesSafe(config.stage1PreparingRegex, fullText)) {
       val shortText =
         if (fullText.contains("已接单") || fullText.contains("已付款")) "已接单" else "备餐中"
@@ -605,6 +824,21 @@ class RegexProgressEngine {
 
   fun applyMinuteTick(order: LiveOrderState, nowMillis: Long = System.currentTimeMillis()): LiveOrderState {
     if (order.stage != DeliveryStage.DELIVERING) return order
+    // Pickup-anchored scheme: interpolate from the pickup moment (20%) to the
+    // latest ETA end (90%). The ETA timestamp is the fixed 90% node and stays put.
+    val pickupAt = order.pickupAtMillis
+    val etaEnd = order.etaTimestampMillis
+    if (pickupAt != null && etaEnd != null) {
+      val anchored = calculateAnchoredProgress(pickupAt, etaEnd, nowMillis)
+      val nextRemaining = ((etaEnd - nowMillis) / 60_000L).toInt().coerceAtLeast(0)
+      return order.copy(
+        remainingMinutes = nextRemaining,
+        progress = maxOf(order.progress, anchored),
+        chipShortText = if (nextRemaining > 0) "${nextRemaining}分钟" else "即将送达",
+        lastUpdatedMillis = nowMillis,
+        matchedRuleName = "Stage 2 · 锚点插值递进 (取货→最晚送达)",
+      )
+    }
     val currentRemaining = order.remainingMinutes ?: return order
     if (currentRemaining <= 1) return order
 
@@ -631,6 +865,19 @@ class RegexProgressEngine {
     }
     if (matchesSafe(config.stage3DeliveredRegex, rawText)) {
       return RegexMatchPreview(true, DeliveryStage.DELIVERED, 100, "已送达", "Stage 3 · 送达完结正则")
+    }
+    // Node signals first, mirroring evaluate(): pickup = 20%, rider assigned =
+    // 10%, merchant accepted = 0%. The ETA branches below are the no-pickup
+    // fallback (first-sighting baseline) — a live anchored order interpolates
+    // from its stored pickup time instead.
+    if (pickupRegex.containsMatchIn(rawText)) {
+      return RegexMatchPreview(true, DeliveryStage.DELIVERING, 20, "已取货", "Stage 2 · 骑手已取货 (锚点 20%~90%)")
+    }
+    if (riderAssignedPhrases.any { rawText.contains(it) }) {
+      return RegexMatchPreview(true, DeliveryStage.PREPARING, 10, "骑手已接单", "Stage 1 · 骑手已接单 (10%)")
+    }
+    if (merchantAcceptedPhrases.any { rawText.contains(it) }) {
+      return RegexMatchPreview(true, DeliveryStage.PREPARING, 0, "已接单", "Stage 1 · 商家已接单 (0%)")
     }
     val latestEta = parseLatestEta(rawText, System.currentTimeMillis())
     if (latestEta != null) {
@@ -679,9 +926,6 @@ class RegexProgressEngine {
         )
       }
     }
-    if (pickupRegex.containsMatchIn(rawText)) {
-      return RegexMatchPreview(true, DeliveryStage.DELIVERING, 50, "已取货", "Stage 2 · 骑手已取货")
-    }
     if (matchesSafe(config.stage2StaticDeliveringRegex, rawText)) {
       return RegexMatchPreview(true, DeliveryStage.DELIVERING, 50, "配送中", "Stage 2 · 静态配送正则")
     }
@@ -690,6 +934,19 @@ class RegexProgressEngine {
       return RegexMatchPreview(true, DeliveryStage.PREPARING, 0, shortText, "Stage 1 · 备餐/接单正则")
     }
     return RegexMatchPreview(false, null, 0, "未匹配", "无规则命中 (将忽略)")
+  }
+
+  /**
+   * Pickup-anchored stage-2 progress: the pickup moment is 20%, the latest ETA
+   * end is 90%, linear in between. Overdue (ETA already passed at pickup) holds
+   * at 90%.
+   */
+  private fun calculateAnchoredProgress(pickupAtMillis: Long, etaMillis: Long, nowMillis: Long): Int {
+    val span = etaMillis - pickupAtMillis
+    if (span <= 0) return 90
+    val elapsed = (nowMillis - pickupAtMillis).coerceAtLeast(0)
+    val fraction = elapsed.toDouble() / span.toDouble()
+    return (20 + 70 * fraction).toInt().coerceIn(20, 90)
   }
 
   /**
