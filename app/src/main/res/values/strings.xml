@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">LiveDelivery</string>
+    <string name="notification_listener_label">LiveDelivery 实时配送监听服务</string>
+    <string name="channel_live_delivery_name">实时配送进度 (Live Updates)</string>
+    <string name="channel_live_delivery_desc">用于展示 Android 16 Live Updates 与三星 Now Bar 实时配送胶囊与进度条</string>
+    <string name="tab_monitor">实时监控</string>
+    <string name="tab_rules">应用与正则</string>
+    <string name="tab_logs">拦截日志</string>
+    <string name="tab_settings">系统设置</string>
+    <string name="action_dismiss_live">关闭实时窗</string>
+    <string name="action_open_source_app">打开原应用</string>
+</resources>

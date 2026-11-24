@@ -1,0 +1,6 @@
+{
+  "name": "LiveDelivery",
+  "description": "Android 16 Live Updates & Samsung Now Bar delivery progress tracker powered by NotificationListenerService and a configurable three-stage regex engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
