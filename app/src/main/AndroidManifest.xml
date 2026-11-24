@@ -15,6 +15,7 @@
         <package android:name="me.ele" />
         <package android:name="com.jingdong.app.mall" />
         <package android:name="com.sankuai.meituan.takeoutnew" />
+        <package android:name="com.taobao.taobao" />
     </queries>
 
     <application
