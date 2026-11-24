@@ -48,6 +48,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.flow.StateFlow
 import com.example.model.DeliveryStage
 import com.example.model.LiveOrderState
 import com.example.ui.theme.PulseAmber
@@ -56,7 +58,7 @@ import com.example.ui.theme.PulseMint
 @Composable
 fun NowBarPreviewCard(
   order: LiveOrderState,
-  nowMillis: Long,
+  tickerMillis: StateFlow<Long>,
   onDismiss: () -> Unit,
   onAdvanceSimulation: (() -> Unit)?,
   modifier: Modifier = Modifier,
@@ -198,18 +200,10 @@ fun NowBarPreviewCard(
 
         val autoDismissAt = order.autoDismissAtMillis
         if (order.stage == DeliveryStage.DELIVERED && autoDismissAt != null) {
-          val remainSec = ((autoDismissAt - nowMillis) / 1000L).coerceAtLeast(0L)
-          Surface(
-            color = PulseMint.copy(alpha = 0.16f),
-            shape = RoundedCornerShape(8.dp),
-          ) {
-            Text(
-              text = "${remainSec}s 后销毁",
-              style = MaterialTheme.typography.labelMedium,
-              color = PulseMint,
-              modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            )
-          }
+          AutoDismissCountdown(
+            autoDismissAtMillis = autoDismissAt,
+            tickerMillis = tickerMillis,
+          )
         } else {
           Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -414,6 +408,30 @@ fun SegmentedProgressTrack(
         },
       radius = 5.dp.toPx(),
       center = Offset(clampedX, centerY),
+    )
+  }
+}
+
+/**
+ * Seconds countdown to auto-dismiss. Collects the 1s ticker locally so only
+ * this row recomposes every second, instead of the whole monitor screen.
+ */
+@Composable
+private fun AutoDismissCountdown(
+  autoDismissAtMillis: Long,
+  tickerMillis: StateFlow<Long>,
+) {
+  val nowMillis by tickerMillis.collectAsStateWithLifecycle()
+  val remainSec = ((autoDismissAtMillis - nowMillis) / 1000L).coerceAtLeast(0L)
+  Surface(
+    color = PulseMint.copy(alpha = 0.16f),
+    shape = RoundedCornerShape(8.dp),
+  ) {
+    Text(
+      text = "${remainSec}s 后销毁",
+      style = MaterialTheme.typography.labelMedium,
+      color = PulseMint,
+      modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
     )
   }
 }
