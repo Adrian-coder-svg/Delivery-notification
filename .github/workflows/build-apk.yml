@@ -27,18 +27,22 @@ jobs:
           unzip -q gradle.zip
           echo "$PWD/gradle-9.3.1/bin" >> "$GITHUB_PATH"
 
-      - name: Use committed debug keystore
-        # The repo ships a fixed debug.keystore so every build shares one
-        # signature and can install over the previous build. Gradle's default
-        # debug signing config reads ~/.android/debug.keystore; copy ours there.
-        # Fall back to generating a fresh one only if the file is missing.
+      - name: Restore debug keystore from secret
+        # The signing key lives in the GitHub secret DEBUG_KEYSTORE_BASE64
+        # (base64 of the debug.keystore), never in the repo — the repo is
+        # public. Every build restores the same key so all builds share one
+        # signature and can install over each other. Fail loudly if the
+        # secret is missing; never silently fall back to a fresh key, or
+        # the signature changes and the app can no longer update in place.
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           mkdir -p ~/.android
-          if [ -f debug.keystore ]; then
-            cp debug.keystore ~/.android/debug.keystore
-          else
-            keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "DEBUG_KEYSTORE_BASE64 secret is not set" >&2
+            exit 1
           fi
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
 
       - name: Run unit tests
         run: gradle testDebugUnitTest --stacktrace
