@@ -96,7 +96,7 @@ object ActiveOrderJsonCodec {
   }
 
   private fun JSONObject.optStringOrNull(key: String): String? =
-    if (isNull(key)) null else optString(key, null)
+    if (isNull(key)) null else optString(key)
 
   private fun JSONObject.optLongOrNull(key: String): Long? =
     if (isNull(key)) null else optLong(key)
