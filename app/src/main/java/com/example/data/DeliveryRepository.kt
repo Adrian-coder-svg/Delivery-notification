@@ -89,7 +89,8 @@ class DeliveryRepository(
     val combinedText = input.combinedText
     if (combinedText.isBlank()) return
 
-    val orderKey = regexEngine.resolveOrderKey(input, ordersMap)
+    val orderKey =
+      regexEngine.resolveOrderKey(input, ordersMap, currentSettings.regexConfig)
 
     // Debounce duplicate notifications to avoid Live Notification flicker
     val lastSeen = lastContentFingerprint[orderKey]
