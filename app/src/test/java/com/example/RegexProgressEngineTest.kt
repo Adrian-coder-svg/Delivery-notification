@@ -209,4 +209,248 @@ class RegexProgressEngineTest {
     assertEquals(10, orderProgress.progress)
     assertEquals("10分钟", orderProgress.chipShortText)
   }
+
+  @Test
+  fun sameOrderWithoutIdStaysInOneLiveNotification() {
+    val firstInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "麦当劳（中关村店）",
+        text = "商家已接单，商家备餐中",
+        bigText = "",
+        orderHintKey = "0|com.sankuai.meituan|1001|null|1001",
+        timestampMillis = 1_700_000_000_000L,
+      )
+    val key1 = engine.resolveOrderKey(firstInput, emptyMap(), config)
+    assertEquals("com.sankuai.meituan:m:麦当劳（中关村店）", key1)
+
+    val firstState =
+      engine.evaluate(
+        input = firstInput,
+        orderKey = key1,
+        existingOrder = null,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+    assertEquals(DeliveryStage.PREPARING, firstState.stage)
+    assertEquals("麦当劳（中关村店）", firstState.merchantName)
+
+    // Same order, new source notification (different sbn key), progress update.
+    val secondInput =
+      firstInput.copy(
+        text = "骑手正前往目的地，预计10分钟送达",
+        orderHintKey = "0|com.sankuai.meituan|2002|null|2002",
+        timestampMillis = 1_700_000_060_000L,
+      )
+    val key2 = engine.resolveOrderKey(secondInput, mapOf(key1 to firstState), config)
+    assertEquals(key1, key2)
+
+    val secondState =
+      engine.evaluate(
+        input = secondInput,
+        orderKey = key2,
+        existingOrder = firstState,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+    assertEquals(firstState.notificationId, secondState.notificationId)
+    assertEquals(DeliveryStage.DELIVERING, secondState.stage)
+  }
+
+  @Test
+  fun twoOrdersFromDifferentMerchantsStaySeparate() {
+    val firstInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "麦当劳（中关村店）",
+        text = "商家已接单，商家备餐中",
+        bigText = "",
+        timestampMillis = 1_700_000_000_000L,
+      )
+    val keyA = engine.resolveOrderKey(firstInput, emptyMap(), config)
+    val firstState =
+      engine.evaluate(
+        input = firstInput,
+        orderKey = keyA,
+        existingOrder = null,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+
+    val secondInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "肯德基（西单店）",
+        text = "商家已接单，商家备餐中",
+        bigText = "",
+        timestampMillis = 1_700_000_030_000L,
+      )
+    val keyB = engine.resolveOrderKey(secondInput, mapOf(keyA to firstState), config)
+    assertEquals("com.sankuai.meituan:m:肯德基（西单店）", keyB)
+    assertEquals(false, keyA == keyB)
+  }
+
+  @Test
+  fun secondOrderFromSameMerchantWhileFirstDeliveringGetsNewKey() {
+    val firstInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "麦当劳（中关村店）",
+        text = "商家已接单，商家备餐中",
+        bigText = "",
+        timestampMillis = 1_700_000_000_000L,
+      )
+    val key1 = engine.resolveOrderKey(firstInput, emptyMap(), config)
+    val preparing =
+      engine.evaluate(
+        input = firstInput,
+        orderKey = key1,
+        existingOrder = null,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+
+    val deliveringInput =
+      firstInput.copy(
+        text = "骑手正前往目的地，预计10分钟送达",
+        timestampMillis = 1_700_000_060_000L,
+      )
+    val delivering =
+      engine.evaluate(
+        input = deliveringInput,
+        orderKey = key1,
+        existingOrder = preparing,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+    assertEquals(DeliveryStage.DELIVERING, delivering.stage)
+
+    // A new order from the same merchant starts while the first is still delivering.
+    val newOrderInput =
+      firstInput.copy(
+        text = "商家已接单，商家备餐中",
+        timestampMillis = 1_700_000_120_000L,
+      )
+    val key2 = engine.resolveOrderKey(newOrderInput, mapOf(key1 to delivering), config)
+    assertEquals("$key1#2", key2)
+  }
+
+  @Test
+  fun fullOrderKeyHintIsUsedAsIs() {
+    val input =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "麦当劳（中关村店）",
+        text = "骑手已取餐正赶往您的位置，预计10分钟送达",
+        bigText = "",
+        orderHintKey = "com.sankuai.meituan:m:麦当劳（中关村店）",
+      )
+    assertEquals(
+      "com.sankuai.meituan:m:麦当劳（中关村店）",
+      engine.resolveOrderKey(input, emptyMap(), config),
+    )
+  }
+
+  @Test
+  fun merchantExtractionFromGenericTitleAndBody() {
+    val merchantInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "美团外卖",
+        text = "麦当劳已接单，正在备餐",
+        bigText = "",
+      )
+    assertEquals("麦当劳", engine.extractMerchantName(merchantInput))
+
+    val bracketInput =
+      ParsedNotificationInput(
+        packageName = "me.ele",
+        appName = "饿了么",
+        title = "饿了么",
+        text = "【老乡鸡】您的订单商家已接单",
+        bigText = "",
+      )
+    assertEquals("老乡鸡", engine.extractMerchantName(bracketInput))
+
+    val promoInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "周末神券来袭",
+        text = "满30减15立即领取",
+        bigText = "",
+      )
+    assertEquals(null, engine.extractMerchantName(promoInput))
+  }
+
+  @Test
+  fun genericTitleFallsBackToMerchantInEvaluate() {
+    val input =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "美团外卖",
+        text = "麦当劳已接单，正在备餐",
+        bigText = "",
+      )
+    val state =
+      engine.evaluate(
+        input = input,
+        orderKey = "com.sankuai.meituan:m:麦当劳",
+        existingOrder = null,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+    assertEquals("麦当劳", state.title)
+    assertEquals("麦当劳", state.merchantName)
+    assertEquals(DeliveryStage.PREPARING, state.stage)
+  }
+
+  @Test
+  fun updateMentioningKnownMerchantAttachesToThatOrder() {
+    val firstInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "麦当劳（中关村店）",
+        text = "商家已接单，商家备餐中",
+        bigText = "",
+        timestampMillis = 1_700_000_000_000L,
+      )
+    val key1 = engine.resolveOrderKey(firstInput, emptyMap(), config)
+    val firstState =
+      engine.evaluate(
+        input = firstInput,
+        orderKey = key1,
+        existingOrder = null,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+
+    // Generic title, body only mentions the merchant in passing.
+    val updateInput =
+      ParsedNotificationInput(
+        packageName = "com.sankuai.meituan",
+        appName = "美团",
+        title = "美团外卖",
+        text = "骑手已取餐，麦当劳的订单配送中",
+        bigText = "",
+        timestampMillis = 1_700_000_060_000L,
+      )
+    val key2 = engine.resolveOrderKey(updateInput, mapOf(key1 to firstState), config)
+    assertEquals(key1, key2)
+  }
 }
