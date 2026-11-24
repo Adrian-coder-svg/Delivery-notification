@@ -3,7 +3,7 @@ package com.example.service
 import android.app.Notification
 import android.content.ComponentName
 import android.service.notification.NotificationListenerService
-import android.service.notification.RankingMap
+import android.service.notification.NotificationListenerService.RankingMap
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.example.LiveDeliveryApp
