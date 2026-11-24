@@ -101,7 +101,6 @@ fun LiveDeliveryRoot(viewModel: MainViewModel) {
   val activeOrders by viewModel.activeOrders.collectAsStateWithLifecycle()
   val interceptLogs by viewModel.interceptLogs.collectAsStateWithLifecycle()
   val permissionStatus by viewModel.permissionStatus.collectAsStateWithLifecycle()
-  val nowMillis by viewModel.tickerMillis.collectAsStateWithLifecycle()
 
   val notificationPermissionLauncher =
     rememberLauncherForActivityResult(
@@ -217,7 +216,7 @@ fun LiveDeliveryRoot(viewModel: MainViewModel) {
                 activeOrders = activeOrders,
                 monitoredApps = settings.monitoredApps,
                 permissionStatus = permissionStatus,
-                nowMillis = nowMillis,
+                tickerMillis = viewModel.tickerMillis,
                 onRequestPostNotificationPermission = {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
