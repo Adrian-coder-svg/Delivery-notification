@@ -37,6 +37,13 @@ data class MonitoredApp(
           enabled = true,
           isPreset = true,
         ),
+        MonitoredApp(
+          packageName = "com.taobao.taobao",
+          displayName = "淘宝闪购",
+          accentColorHex = 0xFFFF5000,
+          enabled = true,
+          isPreset = true,
+        ),
       )
   }
 }
@@ -81,6 +88,10 @@ data class LiveOrderState(
   val appName: String,
   val accentColorHex: Long,
   val merchantName: String? = null,
+  /** Moment the rider picked up the goods (anchors the third progress scheme). */
+  val pickupAtMillis: Long? = null,
+  /** Key of the source system notification this order was last updated from. */
+  val sourceNotificationKey: String? = null,
   val title: String,
   val contentText: String,
   val stage: DeliveryStage,
