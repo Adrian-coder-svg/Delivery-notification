@@ -12,7 +12,13 @@ class DeliveryNotificationListener : NotificationListenerService() {
   override fun onListenerConnected() {
     super.onListenerConnected()
     Log.i(TAG, "NotificationListener connected")
-    (application as? LiveDeliveryApp)?.container?.repository?.setListenerConnected(true)
+    val app = application as? LiveDeliveryApp ?: return
+    app.container.repository.setListenerConnected(true)
+
+    // Inspect active notifications once upon connection to catch in-progress deliveries
+    runCatching { activeNotifications }.getOrNull()?.forEach { sbn ->
+      dispatchIfMonitored(sbn, app)
+    }
   }
 
   override fun onListenerDisconnected() {
@@ -28,19 +34,26 @@ class DeliveryNotificationListener : NotificationListenerService() {
 
   override fun onNotificationPosted(sbn: StatusBarNotification?) {
     if (sbn == null) return
+    val app = application as? LiveDeliveryApp ?: return
+    dispatchIfMonitored(sbn, app)
+  }
+
+  private fun dispatchIfMonitored(sbn: StatusBarNotification, app: LiveDeliveryApp) {
     val sourcePackage = sbn.packageName ?: return
     if (sourcePackage == packageName) return
+    if (!app.container.repository.isMonitoredPackage(sourcePackage)) return
 
-    val notification = sbn.notification ?: return
-    val extras = notification.extras ?: return
-
+    val extras = sbn.notification?.extras ?: return
     val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
     val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
-    val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().orEmpty()
+    val bigText =
+      extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+        ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+          ?.joinToString(" ") { it?.toString().orEmpty() }
+          .orEmpty()
 
     if (title.isBlank() && text.isBlank() && bigText.isBlank()) return
 
-    val app = application as? LiveDeliveryApp ?: return
     app.container.repository.processNotification(
       packageName = sourcePackage,
       title = title,

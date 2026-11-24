@@ -62,6 +62,18 @@ data class RegexConfig(
   }
 }
 
+data class OrderProgress(
+  val orderKey: String,
+  val packageName: String,
+  val title: String,
+  val text: String,
+  val bigText: String = "",
+  val stage: DeliveryStage,
+  val progress: Int,
+  val chipShortText: String,
+  val updatedAtMillis: Long = System.currentTimeMillis(),
+)
+
 data class LiveOrderState(
   val orderKey: String,
   val notificationId: Int,
@@ -85,7 +97,20 @@ data class LiveOrderState(
   val isPromotedOngoing: Boolean = false,
   val promotionDiagnostic: String = "",
   val userDismissed: Boolean = false,
-)
+) {
+  fun toOrderProgress(rawText: String = contentText, rawBigText: String = ""): OrderProgress =
+    OrderProgress(
+      orderKey = orderKey,
+      packageName = packageName,
+      title = title,
+      text = rawText,
+      bigText = rawBigText,
+      stage = stage,
+      progress = progress,
+      chipShortText = chipShortText,
+      updatedAtMillis = lastUpdatedMillis,
+    )
+}
 
 data class InterceptLogEntry(
   val id: String,

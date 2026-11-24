@@ -161,4 +161,52 @@ class RegexProgressEngineTest {
       )
     assertNull(state)
   }
+
+  @Test
+  fun newOrderAfterDeliveredDoesNotInheritStaleBaseline() {
+    val delivered =
+      engine.evaluate(
+        input =
+          ParsedNotificationInput(
+            packageName = "com.sankuai.meituan",
+            appName = "美团",
+            title = "美团外卖",
+            text = "您的订单已送达，感谢使用",
+            bigText = "",
+          ),
+        orderKey = "com.sankuai.meituan:default",
+        existingOrder = null,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!.copy(initialMinutes = 20)
+
+    val freshOrder =
+      engine.evaluate(
+        input =
+          ParsedNotificationInput(
+            packageName = "com.sankuai.meituan",
+            appName = "美团",
+            title = "美团外卖",
+            text = "骑手正前往目的地，预计10分钟送达",
+            bigText = "",
+          ),
+        orderKey = "com.sankuai.meituan:default",
+        existingOrder = delivered,
+        config = config,
+        accentColorHex = 0xFFFFC300L,
+        autoDismissSeconds = 300,
+      )!!
+
+    assertEquals(DeliveryStage.DELIVERING, freshOrder.stage)
+    assertEquals(10, freshOrder.initialMinutes)
+    assertEquals(10, freshOrder.progress)
+
+    val orderProgress = freshOrder.toOrderProgress(rawText = "骑手正前往目的地，预计10分钟送达")
+    assertEquals("美团外卖", orderProgress.title)
+    assertEquals("骑手正前往目的地，预计10分钟送达", orderProgress.text)
+    assertEquals(DeliveryStage.DELIVERING, orderProgress.stage)
+    assertEquals(10, orderProgress.progress)
+    assertEquals("10分钟", orderProgress.chipShortText)
+  }
 }

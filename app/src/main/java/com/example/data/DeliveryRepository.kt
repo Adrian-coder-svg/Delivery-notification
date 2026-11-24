@@ -56,6 +56,12 @@ class DeliveryRepository(
     _isListenerConnected.value = connected
   }
 
+  fun isMonitoredPackage(packageName: String): Boolean {
+    return settings.value.monitoredApps.any {
+      it.packageName.equals(packageName, ignoreCase = true) && it.enabled
+    }
+  }
+
   fun processNotification(
     packageName: String,
     title: String,

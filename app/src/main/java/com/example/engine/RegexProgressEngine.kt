@@ -82,6 +82,8 @@ class RegexProgressEngine {
     val displayBody = input.bigText.ifBlank { input.text }.ifBlank { input.title }
     val notificationId = existingOrder?.notificationId
       ?: (BASE_NOTIFICATION_ID + abs(orderKey.hashCode() % 50_000))
+    val activeExisting =
+      existingOrder?.takeIf { it.stage != DeliveryStage.DELIVERED && !it.userDismissed }
 
     // 1. Check Stage 3 (Delivered - 100%)
     if (matchesSafe(config.stage3DeliveredRegex, fullText)) {
@@ -97,9 +99,9 @@ class RegexProgressEngine {
         stage = DeliveryStage.DELIVERED,
         progress = 100,
         chipShortText = "已送达",
-        initialMinutes = existingOrder?.initialMinutes,
+        initialMinutes = activeExisting?.initialMinutes,
         remainingMinutes = 0,
-        initialDistanceMeters = existingOrder?.initialDistanceMeters,
+        initialDistanceMeters = activeExisting?.initialDistanceMeters,
         remainingDistanceMeters = 0,
         etaTimestampMillis = null,
         matchedRuleName = "Stage 3 · 送达完结正则",
@@ -117,8 +119,8 @@ class RegexProgressEngine {
       val remainingMinutes = etaMatch.groupValues.getOrNull(1)?.toIntOrNull()?.coerceAtLeast(1)
       if (remainingMinutes != null) {
         val initialMinutes =
-          if (existingOrder?.initialMinutes != null) {
-            maxOf(existingOrder.initialMinutes, remainingMinutes)
+          if (activeExisting?.initialMinutes != null) {
+            maxOf(activeExisting.initialMinutes, remainingMinutes)
           } else {
             remainingMinutes.coerceAtLeast(1)
           }
@@ -137,8 +139,8 @@ class RegexProgressEngine {
           chipShortText = "${remainingMinutes}分钟",
           initialMinutes = initialMinutes,
           remainingMinutes = remainingMinutes,
-          initialDistanceMeters = existingOrder?.initialDistanceMeters,
-          remainingDistanceMeters = existingOrder?.remainingDistanceMeters,
+          initialDistanceMeters = activeExisting?.initialDistanceMeters,
+          remainingDistanceMeters = activeExisting?.remainingDistanceMeters,
           etaTimestampMillis = etaMillis,
           matchedRuleName = "Stage 2 · 动态时间正则 (基准 ${initialMinutes}m)",
           lastUpdatedMillis = input.timestampMillis,
@@ -159,7 +161,7 @@ class RegexProgressEngine {
           } else {
             rawValue.toInt().coerceAtLeast(1)
           }
-        val existingInitialDist = existingOrder?.initialDistanceMeters
+        val existingInitialDist = activeExisting?.initialDistanceMeters
         val initialDist =
           if (existingInitialDist != null) {
             maxOf(existingInitialDist, meters)
