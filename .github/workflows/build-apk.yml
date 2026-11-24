@@ -31,19 +31,22 @@ jobs:
         # The signing key is stored AES-256-encrypted in debug.keystore.enc
         # (committed to the repo — ciphertext only, safe to publish); the
         # passphrase lives in the GitHub secret DEBUG_KEYSTORE_PASSPHRASE.
-        # This replaces the base64 secret, whose 3.5 KB value was corrupted
-        # twice on entry (runs #11/#12 failed to decode it). Verify the
-        # decrypted keystore reads back, so a wrong passphrase fails loudly.
+        # IMPORTANT: the app's build.gradle.kts signs the DEBUG build with
+        # ${rootDir}/debug.keystore (its debugConfig), NOT ~/.android. So the
+        # decrypted keystore must OVERWRITE ./debug.keystore in the working
+        # tree before building. (Run #13 decrypted to ~/.android instead and
+        # silently signed with the old repo-root key — same APK as run #10.)
+        # Verify the decrypted keystore reads back, so a wrong passphrase
+        # fails loudly.
         env:
           KEYSTORE_PASSPHRASE: ${{ secrets.DEBUG_KEYSTORE_PASSPHRASE }}
         run: |
-          mkdir -p ~/.android
           if [ -z "$KEYSTORE_PASSPHRASE" ]; then
             echo "DEBUG_KEYSTORE_PASSPHRASE secret is not set" >&2
             exit 1
           fi
-          openssl enc -d -aes-256-cbc -pbkdf2 -in debug.keystore.enc -out ~/.android/debug.keystore -pass pass:"$KEYSTORE_PASSPHRASE"
-          keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey > /dev/null
+          openssl enc -d -aes-256-cbc -pbkdf2 -in debug.keystore.enc -out debug.keystore -pass pass:"$KEYSTORE_PASSPHRASE"
+          keytool -list -keystore debug.keystore -storepass android -alias androiddebugkey > /dev/null
 
       - name: Run unit tests
         run: gradle testDebugUnitTest --stacktrace
