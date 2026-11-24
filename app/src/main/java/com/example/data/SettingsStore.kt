@@ -9,9 +9,11 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.model.LiveOrderState
 import com.example.model.MonitoredApp
 import com.example.model.RegexConfig
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 import org.json.JSONObject
@@ -38,6 +40,8 @@ class SettingsStore(private val context: Context) {
 
   private object Keys {
     val MONITORED_APPS_JSON = stringPreferencesKey("monitored_apps_json")
+    val REMOVED_PRESET_PACKAGES = stringPreferencesKey("removed_preset_packages")
+    val ACTIVE_ORDERS_JSON = stringPreferencesKey("active_orders_json")
     val STAGE1_REGEX = stringPreferencesKey("stage1_regex")
     val STAGE2_STATIC_REGEX = stringPreferencesKey("stage2_static_regex")
     val STAGE2_ETA_REGEX = stringPreferencesKey("stage2_eta_regex")
@@ -50,9 +54,24 @@ class SettingsStore(private val context: Context) {
 
   val settingsFlow: Flow<UserSettings> =
     context.liveDeliveryDataStore.data.map { prefs ->
-      val apps =
+      // Merge in presets added by app updates (e.g. 淘宝闪购), unless the user
+      // explicitly removed that preset before.
+      val removedPresets =
+        prefs[Keys.REMOVED_PRESET_PACKAGES]
+          ?.split(",")
+          ?.map { it.trim() }
+          ?.filter { it.isNotEmpty() }
+          ?.toSet()
+          .orEmpty()
+      val storedApps =
         prefs[Keys.MONITORED_APPS_JSON]?.let(::decodeMonitoredApps)
           ?: MonitoredApp.PRESETS
+      val apps =
+        storedApps +
+          MonitoredApp.PRESETS.filter { preset ->
+            preset.packageName !in removedPresets &&
+              storedApps.none { it.packageName.equals(preset.packageName, ignoreCase = true) }
+          }
 
       val regexConfig =
         RegexConfig(
@@ -81,6 +100,46 @@ class SettingsStore(private val context: Context) {
     context.liveDeliveryDataStore.edit { prefs ->
       prefs[Keys.MONITORED_APPS_JSON] = encodeMonitoredApps(apps)
     }
+  }
+
+  /** Remember a preset the user removed, so app updates never re-add it. */
+  suspend fun recordRemovedPreset(packageName: String) {
+    context.liveDeliveryDataStore.edit { prefs ->
+      val current =
+        prefs[Keys.REMOVED_PRESET_PACKAGES]
+          ?.split(",")
+          ?.map { it.trim() }
+          ?.filter { it.isNotEmpty() }
+          ?.toSet()
+          .orEmpty()
+      prefs[Keys.REMOVED_PRESET_PACKAGES] = (current + packageName).joinToString(",")
+    }
+  }
+
+  /** Clear a previous removal record (user re-added the app). */
+  suspend fun clearRemovedPreset(packageName: String) {
+    context.liveDeliveryDataStore.edit { prefs ->
+      val current =
+        prefs[Keys.REMOVED_PRESET_PACKAGES]
+          ?.split(",")
+          ?.map { it.trim() }
+          ?.filter { it.isNotEmpty() && !it.equals(packageName, ignoreCase = true) }
+          ?.toSet()
+          .orEmpty()
+      prefs[Keys.REMOVED_PRESET_PACKAGES] = current.joinToString(",")
+    }
+  }
+
+  /** Persist in-flight live orders for restore after a process restart. */
+  suspend fun saveActiveOrders(orders: List<LiveOrderState>) {
+    context.liveDeliveryDataStore.edit { prefs ->
+      prefs[Keys.ACTIVE_ORDERS_JSON] = ActiveOrderJsonCodec.encode(orders)
+    }
+  }
+
+  suspend fun loadActiveOrders(): List<LiveOrderState> {
+    val raw = context.liveDeliveryDataStore.data.first()[Keys.ACTIVE_ORDERS_JSON] ?: return emptyList()
+    return ActiveOrderJsonCodec.decode(raw)
   }
 
   suspend fun saveRegexConfig(config: RegexConfig) {
