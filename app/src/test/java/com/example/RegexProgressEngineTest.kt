@@ -223,7 +223,7 @@ class RegexProgressEngineTest {
         timestampMillis = 1_700_000_000_000L,
       )
     val key1 = engine.resolveOrderKey(firstInput, emptyMap(), config)
-    assertEquals("com.sankuai.meituan:m:麦当劳（中关村店）", key1)
+    assertEquals("com.sankuai.meituan:m:麦当劳", key1)
 
     val firstState =
       engine.evaluate(
@@ -292,7 +292,7 @@ class RegexProgressEngineTest {
         timestampMillis = 1_700_000_030_000L,
       )
     val keyB = engine.resolveOrderKey(secondInput, mapOf(keyA to firstState), config)
-    assertEquals("com.sankuai.meituan:m:肯德基（西单店）", keyB)
+    assertEquals("com.sankuai.meituan:m:肯德基", keyB)
     assertEquals(false, keyA == keyB)
   }
 
@@ -401,7 +401,7 @@ class RegexProgressEngineTest {
         packageName = "com.sankuai.meituan",
         appName = "美团",
         title = "美团外卖",
-        text = "麦当劳已接单，正在备餐",
+        text = "商家已接单，麦当劳正在备餐",
         bigText = "",
       )
     val state =
