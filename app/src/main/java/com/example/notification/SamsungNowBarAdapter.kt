@@ -17,6 +17,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.model.DeliveryStage
 import com.example.model.LiveOrderState
+import java.util.concurrent.ConcurrentHashMap
 
 data class LivePostResult(
   val posted: Boolean,
@@ -30,13 +31,33 @@ data class LivePostResult(
  * `setRequestPromotedOngoing` + `setShortCriticalText`) and Samsung One UI 8/8.5+ Now Bar.
  *
  * Never uses custom RemoteViews (which One UI 8+ downgrades/blocks for Now Bar).
+ *
+ * Per-post work is kept minimal: the notification channel is ensured once per
+ * process, the per-order PendingIntents are cached by notification id, the
+ * source-app launch intent is cached per package, and the promoted-notification
+ * capability is re-checked at most once a minute.
  */
 class SamsungNowBarAdapter(private val context: Context) {
 
   private val notificationManager: NotificationManager =
     context.getSystemService(NotificationManager::class.java)
 
+  private var channelEnsured = false
+
+  private data class CachedIntents(
+    val content: PendingIntent,
+    val dismiss: PendingIntent,
+    val delete: PendingIntent,
+  )
+
+  private val pendingIntentCache = ConcurrentHashMap<Int, CachedIntents>()
+  private val launchIntentCache = ConcurrentHashMap<String, PendingIntent?>()
+
+  @Volatile private var lastPromoteCheckMillis = 0L
+  @Volatile private var lastPromoteCheckResult = false
+
   fun ensureNotificationChannel() {
+    if (channelEnsured) return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val existing = notificationManager.getNotificationChannel(CHANNEL_ID)
       if (existing == null) {
@@ -56,6 +77,7 @@ class SamsungNowBarAdapter(private val context: Context) {
         notificationManager.createNotificationChannel(channel)
       }
     }
+    channelEnsured = true
   }
 
   fun canPostNotifications(): Boolean {
@@ -69,11 +91,78 @@ class SamsungNowBarAdapter(private val context: Context) {
   }
 
   fun canPostPromotedNotifications(): Boolean {
-    return if (Build.VERSION.SDK_INT >= 36) {
+    if (Build.VERSION.SDK_INT < 36) return false
+    // The capability only changes when the user toggles it in system settings,
+    // so re-check at most once a minute instead of on every post.
+    val now = System.currentTimeMillis()
+    if (now - lastPromoteCheckMillis < 60_000L) return lastPromoteCheckResult
+    val result =
       runCatching { notificationManager.canPostPromotedNotifications() }.getOrDefault(false)
-    } else {
-      false
+    lastPromoteCheckResult = result
+    lastPromoteCheckMillis = now
+    return result
+  }
+
+  private fun cachedIntentsFor(order: LiveOrderState): CachedIntents {
+    return pendingIntentCache.getOrPut(order.notificationId) {
+      val openAppIntent =
+        Intent(context, MainActivity::class.java).apply {
+          flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+          putExtra(EXTRA_ORDER_KEY, order.orderKey)
+        }
+      val content =
+        PendingIntent.getActivity(
+          context,
+          order.notificationId,
+          openAppIntent,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+      val dismissIntent =
+        Intent(context, LiveNotificationActionReceiver::class.java).apply {
+          action = LiveNotificationActionReceiver.ACTION_DISMISS_LIVE_ORDER
+          putExtra(LiveNotificationActionReceiver.EXTRA_ORDER_KEY, order.orderKey)
+          putExtra(LiveNotificationActionReceiver.EXTRA_NOTIFICATION_ID, order.notificationId)
+        }
+      val dismiss =
+        PendingIntent.getBroadcast(
+          context,
+          order.notificationId + 100_000,
+          dismissIntent,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+      val deleteIntent =
+        Intent(context, LiveNotificationActionReceiver::class.java).apply {
+          action = LiveNotificationActionReceiver.ACTION_NOTIFICATION_DELETED
+          putExtra(LiveNotificationActionReceiver.EXTRA_ORDER_KEY, order.orderKey)
+          putExtra(LiveNotificationActionReceiver.EXTRA_NOTIFICATION_ID, order.notificationId)
+        }
+      val delete =
+        PendingIntent.getBroadcast(
+          context,
+          order.notificationId + 200_000,
+          deleteIntent,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+      CachedIntents(content, dismiss, delete)
     }
+  }
+
+  private fun openSourcePendingIntentFor(packageName: String): PendingIntent? {
+    // The source-app launch intent carries no per-order extras, so one cached
+    // PendingIntent per package serves every order from that app. A missing app
+    // is not cached (ConcurrentHashMap forbids null values), so it re-checks.
+    launchIntentCache[packageName]?.let { return it }
+    val pending =
+      context.packageManager.getLaunchIntentForPackage(packageName)?.let { launchIntent ->
+        PendingIntent.getActivity(
+          context,
+          packageName.hashCode(),
+          launchIntent,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+      }
+    if (pending != null) launchIntentCache[packageName] = pending
+    return pending
   }
 
   fun postOrUpdateLiveOrder(order: LiveOrderState): LivePostResult {
@@ -88,65 +177,18 @@ class SamsungNowBarAdapter(private val context: Context) {
       )
     }
 
-    val openAppIntent =
-      Intent(context, MainActivity::class.java).apply {
-        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
-        putExtra(EXTRA_ORDER_KEY, order.orderKey)
-      }
-    val contentPendingIntent =
-      PendingIntent.getActivity(
-        context,
-        order.notificationId,
-        openAppIntent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-      )
-
-    val dismissIntent =
-      Intent(context, LiveNotificationActionReceiver::class.java).apply {
-        action = LiveNotificationActionReceiver.ACTION_DISMISS_LIVE_ORDER
-        putExtra(LiveNotificationActionReceiver.EXTRA_ORDER_KEY, order.orderKey)
-        putExtra(LiveNotificationActionReceiver.EXTRA_NOTIFICATION_ID, order.notificationId)
-      }
-    val dismissPendingIntent =
-      PendingIntent.getBroadcast(
-        context,
-        order.notificationId + 100_000,
-        dismissIntent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-      )
-
-    val deleteIntent =
-      Intent(context, LiveNotificationActionReceiver::class.java).apply {
-        action = LiveNotificationActionReceiver.ACTION_NOTIFICATION_DELETED
-        putExtra(LiveNotificationActionReceiver.EXTRA_ORDER_KEY, order.orderKey)
-        putExtra(LiveNotificationActionReceiver.EXTRA_NOTIFICATION_ID, order.notificationId)
-      }
-    val deletePendingIntent =
-      PendingIntent.getBroadcast(
-        context,
-        order.notificationId + 200_000,
-        deleteIntent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-      )
-
-    val launchSourceIntent =
-      context.packageManager.getLaunchIntentForPackage(order.packageName)
-    val openSourcePendingIntent =
-      launchSourceIntent?.let {
-        PendingIntent.getActivity(
-          context,
-          order.notificationId + 300_000,
-          it,
-          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-      }
+    val cachedIntents = cachedIntentsFor(order)
+    val contentPendingIntent = cachedIntents.content
+    val dismissPendingIntent = cachedIntents.dismiss
+    val deletePendingIntent = cachedIntents.delete
+    val openSourcePendingIntent = openSourcePendingIntentFor(order.packageName)
 
     val brandColorInt = order.accentColorHex.toInt()
     val stageColorInt =
       when (order.stage) {
-        DeliveryStage.PREPARING -> AndroidColor.parseColor("#F59E0B")
+        DeliveryStage.PREPARING -> PREPARING_COLOR
         DeliveryStage.DELIVERING -> brandColorInt
-        DeliveryStage.DELIVERED -> AndroidColor.parseColor("#10B981")
+        DeliveryStage.DELIVERED -> DELIVERED_COLOR
       }
 
     val nowBarExtras =
@@ -260,6 +302,7 @@ class SamsungNowBarAdapter(private val context: Context) {
   }
 
   fun cancelNotification(notificationId: Int) {
+    pendingIntentCache.remove(notificationId)
     notificationManager.cancel(notificationId)
   }
 
@@ -271,9 +314,9 @@ class SamsungNowBarAdapter(private val context: Context) {
       throw IllegalStateException("ProgressStyle requires API 36+")
     }
 
-    val prepColor = AndroidColor.parseColor("#F59E0B")
+    val prepColor = PREPARING_COLOR
     val deliveryColor = brandColorInt
-    val arriveColor = AndroidColor.parseColor("#10B981")
+    val arriveColor = DELIVERED_COLOR
 
     val trackerIcon =
       Icon.createWithResource(
@@ -304,5 +347,8 @@ class SamsungNowBarAdapter(private val context: Context) {
   companion object {
     const val CHANNEL_ID = "live_delivery_updates"
     const val EXTRA_ORDER_KEY = "extra_order_key"
+
+    private val PREPARING_COLOR: Int = AndroidColor.parseColor("#F59E0B")
+    private val DELIVERED_COLOR: Int = AndroidColor.parseColor("#10B981")
   }
 }
